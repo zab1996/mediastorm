@@ -1746,6 +1746,65 @@ func (h *LiveHandler) resolveProfileLiveSource(r *http.Request, globalSettings c
 	return models.ResolveLiveSource(&userSettings.LiveTV, &global)
 }
 
+// FetchFilteredChannelsForRequest resolves the caller's configured Live TV sources
+// (honoring profileId/sourceId query params the same way GetChannels does) and returns
+// the combined, admin-filtered channel list. Used by non-Live-TV callers (e.g. the sports
+// game-stream matcher) that need the same channel set a user would see in the Live TV tab.
+func (h *LiveHandler) FetchFilteredChannelsForRequest(r *http.Request) ([]LiveChannel, error) {
+	settings, err := h.cfgManager.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load settings: %w", err)
+	}
+
+	src := h.resolveProfileLiveSource(r, settings)
+	filter := config.LiveTVFilterSettings{
+		EnabledCategories: src.EnabledCategories,
+		MaxChannels:       src.MaxChannels,
+	}
+
+	sources := resolvedLiveSources(src)
+	selectedSources := selectM3USources(sources, r.URL.Query().Get("sourceId"))
+	if len(selectedSources) == 0 {
+		return nil, nil
+	}
+	includeSourceInID := len(sources) > 1
+
+	var allChannels []LiveChannel
+	for _, liveSource := range selectedSources {
+		sourceFilter := filter
+		if liveSource.HasFilterOverride {
+			sourceFilter = liveSource.Filter
+		}
+		var sourceChannels []LiveChannel
+		switch liveSource.Mode {
+		case "xtream":
+			channels, err := h.fetchXtreamChannels(r.Context(), liveSource.XtreamHost, liveSource.XtreamUsername, liveSource.XtreamPassword, liveSource.ProxyURL)
+			if err != nil {
+				log.Printf("[live] FetchFilteredChannelsForRequest Xtream error for source %q: %v", liveSource.ID, err)
+				continue
+			}
+			sourceChannels = channels
+		case "stremio":
+			channels, err := h.fetchStremioChannels(r.Context(), liveSource.ManifestURL, liveSource.ProxyURL)
+			if err != nil {
+				log.Printf("[live] FetchFilteredChannelsForRequest Stremio error for source %q: %v", liveSource.ID, err)
+				continue
+			}
+			sourceChannels = channels
+		default:
+			contents, err := h.fetchPlaylistContents(r.Context(), liveSource.PlaylistURL, liveSource.ProxyURL)
+			if err != nil {
+				log.Printf("[live] FetchFilteredChannelsForRequest error for source %q: %v", liveSource.ID, err)
+				continue
+			}
+			sourceChannels = parseM3UPlaylist(contents)
+		}
+		allChannels = append(allChannels, tagChannelsWithSource(filterChannels(sourceChannels, sourceFilter), liveSource, includeSourceInID)...)
+	}
+
+	return allChannels, nil
+}
+
 // GetChannels returns parsed and filtered channels from the configured playlist.
 func (h *LiveHandler) GetChannels(w http.ResponseWriter, r *http.Request) {
 	requestStartedAt := time.Now()

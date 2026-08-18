@@ -64,6 +64,7 @@ import (
 	"novastream/services/scrob"
 	"novastream/services/sessions"
 	"novastream/services/simkl"
+	"novastream/services/sports"
 	"novastream/services/streaming"
 	"novastream/services/trakt"
 	"novastream/services/usenet"
@@ -847,6 +848,25 @@ func main() {
 		}
 	}
 
+	// Create Sports service and handler (ESPN-backed live scores + game-to-stream matching)
+	sportsService := sports.NewService(settings.Cache.Directory)
+	sportsHandler := handlers.NewSportsHandler(sportsService, liveHandler, epgService)
+	go func() {
+		refresh := func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := sportsService.Refresh(ctx); err != nil {
+				log.Printf("[sports] refresh error: %v", err)
+			}
+		}
+		refresh()
+		ticker := time.NewTicker(90 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			refresh()
+		}
+	}()
+
 	// Create subtitles handler for external subtitle search
 	subtitlesHandler := handlers.NewSubtitlesHandlerWithConfig(cfgManager)
 
@@ -914,6 +934,7 @@ func main() {
 		recordingsHandler,
 		localMediaHandler,
 		epgHandler,
+		sportsHandler,
 		userSettingsHandler,
 		subtitlesHandler,
 		clientsHandler,

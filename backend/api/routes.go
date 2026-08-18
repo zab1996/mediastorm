@@ -112,6 +112,7 @@ func Register(
 	recordingsHandler *handlers.RecordingsHandler,
 	localMediaHandler *handlers.LocalMediaHandler,
 	epgHandler *handlers.EPGHandler,
+	sportsHandler *handlers.SportsHandler,
 	userSettingsHandler *handlers.UserSettingsHandler,
 	subtitlesHandler *handlers.SubtitlesHandler,
 	clientsHandler *handlers.ClientsHandler,
@@ -451,6 +452,22 @@ func Register(
 		protected.HandleFunc("/live/epg/status", epgHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/live/epg/refresh", epgHandler.Refresh).Methods(http.MethodPost)
 		protected.HandleFunc("/live/epg/refresh", epgHandler.Options).Methods(http.MethodOptions)
+	}
+
+	// Sports scoreboard endpoints (ESPN-backed live scores + Live TV stream matching)
+	if sportsHandler != nil {
+		protected.HandleFunc("/sports/scoreboard", sportsHandler.GetScoreboard).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/scoreboard", sportsHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/leagues", sportsHandler.GetLeagues).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/leagues", sportsHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/status", sportsHandler.GetStatus).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/status", sportsHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/refresh", sportsHandler.Refresh).Methods(http.MethodPost)
+		protected.HandleFunc("/sports/refresh", sportsHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/game/{id}", sportsHandler.GetGame).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/game/{id}", sportsHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/game/{id}/streams", sportsHandler.GetGameStreams).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/game/{id}/streams", sportsHandler.Options).Methods(http.MethodOptions)
 	}
 
 	// VOD stream usage endpoint
