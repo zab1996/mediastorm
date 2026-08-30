@@ -170,14 +170,31 @@ func (r *pgSportsLinksRepo) DeleteLink(ctx context.Context, teamID, linkID strin
 	return nil
 }
 
-// ReorderBackups rewrites backup positions in a single set-based statement (positions
-// 1..len(orderedLinkIDs), in the given order) so the UNIQUE(team_id, slot, position)
-// constraint can't be transiently violated by an ordering-dependent sequence of
-// single-row updates.
+// reorderPositionOffset is added to every backup's position before the final set-based
+// update, so intermediate values can never collide with either the old or new position
+// ordering (both live in [0, reorderPositionOffset)).
+const reorderPositionOffset = 1_000_000
+
+// ReorderBackups rewrites backup positions to 1..len(orderedLinkIDs) in the given order.
+// Postgres checks the UNIQUE(team_id, slot, position) constraint per row as an UPDATE
+// processes them, even within one statement - a straight "set final positions" statement
+// can still transiently collide mid-statement on a swap (e.g. position 1 -> 2 lands on a
+// row still at 2). So this runs in two passes: first bump every backup's position out of
+// the live range, then set final positions - two non-transactional statements (this
+// repository doesn't have transaction access), acceptable for this low-concurrency admin
+// action, but not atomic against a concurrent reorder of the same team.
 func (r *pgSportsLinksRepo) ReorderBackups(ctx context.Context, teamID string, orderedLinkIDs []string) error {
 	if len(orderedLinkIDs) == 0 {
 		return nil
 	}
+	if _, err := r.pool.Exec(ctx, `
+		UPDATE sports_team_channel_links
+		SET position = position + $1
+		WHERE team_id = $2 AND slot = 'backup'`,
+		reorderPositionOffset, teamID); err != nil {
+		return fmt.Errorf("reorder backup channel links (offset pass): %w", err)
+	}
+
 	positions := make([]int32, len(orderedLinkIDs))
 	for i := range orderedLinkIDs {
 		positions[i] = int32(i + 1)
@@ -189,7 +206,7 @@ func (r *pgSportsLinksRepo) ReorderBackups(ctx context.Context, teamID string, o
 		WHERE l.id = v.link_id AND l.team_id = $3 AND l.slot = 'backup'`,
 		orderedLinkIDs, positions, teamID)
 	if err != nil {
-		return fmt.Errorf("reorder backup channel links: %w", err)
+		return fmt.Errorf("reorder backup channel links (final pass): %w", err)
 	}
 	return nil
 }
