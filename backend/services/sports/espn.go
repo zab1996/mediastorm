@@ -17,10 +17,28 @@ type espnScoreboardResponse struct {
 
 type espnEvent struct {
 	ID           string            `json:"id"`
-	Date         time.Time         `json:"date"`
+	Date         string            `json:"date"`
 	Name         string            `json:"name"`
 	ShortName    string            `json:"shortName"`
 	Competitions []espnCompetition `json:"competitions"`
+}
+
+// ESPN's scoreboard timestamps are usually RFC3339 but sometimes omit seconds
+// (e.g. "2026-08-30T16:15Z" instead of "2026-08-30T16:15:00Z") - try both rather
+// than failing the whole decode over a single game's timestamp.
+var espnDateLayouts = []string{
+	time.RFC3339,
+	"2006-01-02T15:04Z",
+	"2006-01-02T15:04Z07:00",
+}
+
+func parseESPNDate(raw string) time.Time {
+	for _, layout := range espnDateLayouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 type espnCompetition struct {
@@ -112,7 +130,7 @@ func espnEventToGame(event espnEvent, league League) (models.SportsGame, bool) {
 		ID:           event.ID,
 		League:       league.ID,
 		Sport:        league.Sport,
-		StartTime:    event.Date,
+		StartTime:    parseESPNDate(event.Date),
 		Status:       espnStatusToGameStatus(comp.Status.Type),
 		StatusDetail: statusDetail,
 		Clock:        comp.Status.DisplayClock,
