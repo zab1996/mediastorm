@@ -90,6 +90,31 @@ func (h *SportsHandler) GetHub(w http.ResponseWriter, r *http.Request) {
 	writeSportsJSON(w, map[string]any{"events": events, "specialTournaments": []any{}})
 }
 
+// searchTerms splits a search query into individual lowercase words, dropping anything
+// under 2 characters (single letters are too noisy to match on). "Chicago Cincinnati"
+// becomes ["chicago", "cincinnati"].
+func searchTerms(query string) []string {
+	fields := strings.Fields(strings.ToLower(query))
+	terms := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if len(field) >= 2 {
+			terms = append(terms, field)
+		}
+	}
+	return terms
+}
+
+// matchesAnySearchTerm reports whether target contains any one of terms as a substring.
+func matchesAnySearchTerm(target string, terms []string) bool {
+	lower := strings.ToLower(target)
+	for _, term := range terms {
+		if strings.Contains(lower, term) {
+			return true
+		}
+	}
+	return false
+}
+
 // SearchLiveHub searches channel metadata, seven days of EPG, and cached sports events.
 func (h *SportsHandler) SearchLiveHub(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -97,7 +122,12 @@ func (h *SportsHandler) SearchLiveHub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"query must contain at least two characters"}`, http.StatusBadRequest)
 		return
 	}
-	needle := strings.ToLower(query)
+	// Split into terms and match ANY of them (not the whole phrase as one substring) - a
+	// caller like the Sports Hub's "Search" action passes both teams' names as one query
+	// (e.g. "Chicago Cincinnati", ynotv-style), and no channel name literally contains that
+	// exact phrase; OR-of-terms surfaces channels/programs naming either team instead of
+	// requiring an exact multi-word match that would never hit.
+	terms := searchTerms(query)
 	channels, err := h.liveHandler.FetchFilteredChannelsForRequest(r)
 	if err != nil {
 		http.Error(w, `{"error":"failed to search live channels"}`, http.StatusBadGateway)
@@ -109,7 +139,7 @@ func (h *SportsHandler) SearchLiveHub(w http.ResponseWriter, r *http.Request) {
 		if channel.TvgID != "" {
 			ids = append(ids, channel.TvgID)
 		}
-		if strings.Contains(strings.ToLower(channel.Name+" "+channel.Group+" "+channel.TvgName), needle) && len(channelMatches) < 100 {
+		if matchesAnySearchTerm(channel.Name+" "+channel.Group+" "+channel.TvgName, terms) && len(channelMatches) < 100 {
 			channelMatches = append(channelMatches, channel)
 		}
 	}
@@ -120,7 +150,7 @@ func (h *SportsHandler) SearchLiveHub(w http.ResponseWriter, r *http.Request) {
 		schedules := schedule.GetScheduleMultiple(ids, now.Add(-time.Hour), now.Add(7*24*time.Hour))
 		for _, programs := range schedules {
 			for _, program := range programs {
-				if !strings.Contains(strings.ToLower(program.Title+" "+program.Description), needle) {
+				if !matchesAnySearchTerm(program.Title+" "+program.Description, terms) {
 					continue
 				}
 				if !program.Start.After(now) && program.Stop.After(now) {
@@ -137,12 +167,12 @@ func (h *SportsHandler) SearchLiveHub(w http.ResponseWriter, r *http.Request) {
 	teams := make([]models.SportsTeam, 0)
 	seenTeams := make(map[string]struct{})
 	for _, game := range h.service.GetScoreboard("") {
-		matchedEvent := strings.Contains(strings.ToLower(game.Title+" "+game.HomeTeam.Name+" "+game.AwayTeam.Name+" "+game.League), needle)
+		matchedEvent := matchesAnySearchTerm(game.Title+" "+game.HomeTeam.Name+" "+game.AwayTeam.Name+" "+game.League, terms)
 		if matchedEvent && len(sportsEvents) < 100 {
 			sportsEvents = append(sportsEvents, game)
 		}
 		for _, team := range []models.SportsTeam{game.HomeTeam, game.AwayTeam} {
-			if !strings.Contains(strings.ToLower(team.Name+" "+team.Location+" "+team.Nickname+" "+team.Abbreviation), needle) {
+			if !matchesAnySearchTerm(team.Name+" "+team.Location+" "+team.Nickname+" "+team.Abbreviation, terms) {
 				continue
 			}
 			key := game.League + ":" + team.ID
