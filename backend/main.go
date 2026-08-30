@@ -917,6 +917,12 @@ func main() {
 	sportsLinksHandler := handlers.NewSportsLinksHandler(store.SportsLinks(), liveHandler)
 	go func() {
 		refresh := func() {
+			// Re-read enabled leagues from live config each tick (not just at startup) so an
+			// admin change to Settings.Sports.EnabledLeagues takes effect on the next poll
+			// without a server restart.
+			if liveSettings, err := cfgManager.Load(); err == nil {
+				sportsService.SetEnabledLeagueIDs(liveSettings.Sports.EnabledLeagues)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			if err := sportsService.Refresh(ctx); err != nil {

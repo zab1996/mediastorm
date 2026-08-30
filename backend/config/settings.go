@@ -50,6 +50,14 @@ type Settings struct {
 	Network         NetworkSettings         `json:"network,omitempty"`
 	Ranking         RankingSettings         `json:"ranking,omitempty"`
 	BackupRetention BackupRetentionSettings `json:"backupRetention,omitempty"`
+	Sports          SportsSettings          `json:"sports,omitempty"`
+}
+
+// SportsSettings controls which leagues the ESPN-backed sports scoreboard service polls.
+// Server-wide (not per-user) since the poller fetches once for the whole server on a
+// shared interval - see services/sports.LeagueCatalog for the supported league IDs.
+type SportsSettings struct {
+	EnabledLeagues []string `json:"enabledLeagues,omitempty"`
 }
 
 type ServerSettings struct {
@@ -1901,6 +1909,7 @@ func DefaultSettings() Settings {
 		Transmux:  TransmuxSettings{Enabled: true, FFmpegPath: "ffmpeg", FFprobePath: "ffprobe", HLSTempDirectory: "/tmp/novastream-hls", HardwareAcceleration: "auto"},
 		Playback:  PlaybackSettings{PreferredPlayer: "native", PreferredAudioLanguage: "eng", PauseWhenAppInactive: false, UseLoadingScreen: false, SubtitleSize: 1.0, SubtitleUseCropDetectPosition: false, SubtitleColor: "#FFFFFF", SubtitleOpacity: 1.0, SubtitleBold: false, SubtitleOutlineEnabled: false, SubtitleOutlineColor: "#000000", SubtitleOutlineWeight: 0.35, SubtitleBackgroundEnabled: true, SubtitleBackgroundColor: "#000000", SubtitleBackgroundOpacity: 0.6, SeekForwardSeconds: 30, SeekBackwardSeconds: 10, PrerollMode: "disabled", PrerollMediaScope: "all", StreamMigrationEnabled: true, CreditsDetectionEnabled: false, MatchFrameRate: false, LiveClosedCaptionExtraction: true, Thumbnails: PlaybackThumbnailSettings{Enabled: false, Workers: 1}},
 		Live:      LiveSettings{Mode: "m3u", PlaylistURL: "", MaxStreams: 0, PlaylistCacheTTLHours: 24},
+		Sports:    SportsSettings{EnabledLeagues: []string{"mlb", "nfl", "nba", "nhl"}},
 		HomeShelves: HomeShelvesSettings{
 			Shelves:                      DefaultHomeShelfConfigs(),
 			ItemCap:                      20,

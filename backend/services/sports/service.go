@@ -33,13 +33,21 @@ type League struct {
 	Slug  string // ESPN "league" path segment, e.g. "mlb"
 }
 
-// DefaultLeagues is the MVP fixed set of tracked leagues.
-var DefaultLeagues = []League{
+// LeagueCatalog is every league this service knows how to fetch from ESPN. Not every
+// catalog entry is necessarily enabled/polled - see config.Settings.Sports.EnabledLeagues
+// and SetEnabledLeagueIDs. Limited to leagues that fit the home-team-vs-away-team scoreboard
+// shape this package models (models.SportsGame) - e.g. motorsports (grid of drivers, not two
+// teams) would need a different data model and isn't included here.
+var LeagueCatalog = []League{
 	{ID: "mlb", Name: "MLB", Sport: "baseball", Slug: "mlb"},
 	{ID: "nfl", Name: "NFL", Sport: "football", Slug: "nfl"},
 	{ID: "nba", Name: "NBA", Sport: "basketball", Slug: "nba"},
 	{ID: "nhl", Name: "NHL", Sport: "hockey", Slug: "nhl"},
+	{ID: "eng.1", Name: "Premier League", Sport: "soccer", Slug: "eng.1"},
 }
+
+// DefaultLeagues is the enabled-by-default subset of LeagueCatalog (the original MVP set).
+var DefaultLeagues = LeagueCatalog[:4]
 
 // Service fetches and caches ESPN scoreboard data.
 type Service struct {
@@ -77,13 +85,40 @@ func NewService(storageDir string) *Service {
 	return s
 }
 
-// Leagues returns the fixed set of tracked leagues.
+// Leagues returns the currently enabled/tracked leagues.
 func (s *Service) Leagues() []models.SportsLeague {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := make([]models.SportsLeague, len(s.leagues))
 	for i, l := range s.leagues {
 		out[i] = models.SportsLeague{ID: l.ID, Name: l.Name, Sport: l.Sport}
 	}
 	return out
+}
+
+// SetEnabledLeagueIDs replaces the set of leagues this service polls/serves, filtered from
+// LeagueCatalog by ID. Unknown IDs are ignored; an empty/all-unknown list falls back to
+// DefaultLeagues rather than polling nothing. Safe to call concurrently with Refresh -
+// intended to be called with the admin-configured config.Settings.Sports.EnabledLeagues
+// before each refresh tick, so a settings change takes effect on the next poll without a
+// server restart.
+func (s *Service) SetEnabledLeagueIDs(ids []string) {
+	enabled := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		enabled[id] = struct{}{}
+	}
+	next := make([]League, 0, len(LeagueCatalog))
+	for _, l := range LeagueCatalog {
+		if _, ok := enabled[l.ID]; ok {
+			next = append(next, l)
+		}
+	}
+	if len(next) == 0 {
+		next = append([]League(nil), DefaultLeagues...)
+	}
+	s.mu.Lock()
+	s.leagues = next
+	s.mu.Unlock()
 }
 
 // GetStatus reports the current health of the scoreboard cache.
@@ -161,9 +196,13 @@ func (s *Service) Refresh(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 
-	nextGames := make(map[string][]models.SportsGame, len(s.leagues))
+	s.mu.RLock()
+	leagues := append([]League(nil), s.leagues...)
+	s.mu.RUnlock()
+
+	nextGames := make(map[string][]models.SportsGame, len(leagues))
 	var firstErr error
-	for _, league := range s.leagues {
+	for _, league := range leagues {
 		games, err := s.fetchLeagueScoreboard(ctx, league)
 		if err != nil {
 			log.Printf("[sports] scoreboard fetch failed for %s: %v", league.ID, err)
