@@ -489,12 +489,18 @@ func Register(
 	// channel links per team). Static "linked-channels" route registered before the
 	// {teamId} wildcard routes so gorilla/mux doesn't treat it as a team ID.
 	if sportsLinksHandler != nil {
+		protected.HandleFunc("/sports/leagues/{leagueId}/auto-link/preview", sportsLinksHandler.PreviewAutoLinks).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/leagues/{leagueId}/auto-link/preview", sportsLinksHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/leagues/{leagueId}/auto-link/apply", sportsLinksHandler.ApplyAutoLinks).Methods(http.MethodPost)
+		protected.HandleFunc("/sports/leagues/{leagueId}/auto-link/apply", sportsLinksHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/sports/teams", sportsLinksHandler.GetTeams).Methods(http.MethodGet)
 		protected.HandleFunc("/sports/teams", sportsLinksHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/sports/teams/linked-channels", sportsLinksHandler.GetLinkedChannels).Methods(http.MethodGet)
 		protected.HandleFunc("/sports/teams/linked-channels", sportsLinksHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/sports/teams/{teamId}/links", sportsLinksHandler.GetTeamLinks).Methods(http.MethodGet)
 		protected.HandleFunc("/sports/teams/{teamId}/links", sportsLinksHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/teams/{teamId}/channel-suggestions", sportsLinksHandler.GetChannelSuggestions).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/teams/{teamId}/channel-suggestions", sportsLinksHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/sports/teams/{teamId}/links/primary", sportsLinksHandler.SetPrimaryLink).Methods(http.MethodPut)
 		protected.HandleFunc("/sports/teams/{teamId}/links/primary", sportsLinksHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/sports/teams/{teamId}/links/backup", sportsLinksHandler.AddBackupLink).Methods(http.MethodPost)

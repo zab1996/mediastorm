@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -149,6 +150,161 @@ func (h *SportsLinksHandler) GetTeamLinks(w http.ResponseWriter, r *http.Request
 		markResolved(&links[i], byTvgID, byName)
 	}
 	writeSportsJSON(w, map[string]any{"links": nonNilLinks(links)})
+}
+
+// GetChannelSuggestions returns confidence-ranked Live TV channels for one team. An
+// optional query keeps manual selection available while still scoring each text match.
+func (h *SportsLinksHandler) GetChannelSuggestions(w http.ResponseWriter, r *http.Request) {
+	teamID := strings.TrimSpace(mux.Vars(r)["teamId"])
+	if teamID == "" {
+		http.Error(w, `{"error":"missing team id"}`, http.StatusBadRequest)
+		return
+	}
+	team, err := h.links.GetTeam(r.Context(), teamID)
+	if err != nil {
+		log.Printf("[sports-links] GetChannelSuggestions: get team failed: %v", err)
+		http.Error(w, `{"error":"failed to look up team"}`, http.StatusInternalServerError)
+		return
+	}
+	if team == nil {
+		http.Error(w, `{"error":"team not found"}`, http.StatusNotFound)
+		return
+	}
+	if h.liveHandler == nil {
+		writeSportsJSON(w, map[string]any{"candidates": []models.SportsChannelCandidate{}})
+		return
+	}
+	channels, err := h.liveHandler.FetchFilteredChannelsForRequest(r)
+	if err != nil {
+		log.Printf("[sports-links] GetChannelSuggestions: fetch channels failed: %v", err)
+		http.Error(w, `{"error":"failed to fetch live channels"}`, http.StatusBadGateway)
+		return
+	}
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 500 {
+			http.Error(w, `{"error":"limit must be between 1 and 500"}`, http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	candidates := rankTeamChannelCandidates(*team, channels, query, limit)
+	writeSportsJSON(w, map[string]any{"candidates": candidates})
+}
+
+type sportsAutoLinkEvaluation struct {
+	preview models.SportsAutoLinkPreview
+	links   []models.SportsTeamChannelLink
+}
+
+func evaluateSportsAutoLinks(league string, teams []models.SportsTeamRecord, linksByTeam map[string][]models.SportsTeamChannelLink, channels []LiveChannel) sportsAutoLinkEvaluation {
+	evaluation := sportsAutoLinkEvaluation{
+		preview: models.SportsAutoLinkPreview{League: league, Results: []models.SportsAutoLinkTeamResult{}},
+		links:   []models.SportsTeamChannelLink{},
+	}
+	for _, team := range teams {
+		result := models.SportsAutoLinkTeamResult{Team: team}
+		for _, link := range linksByTeam[team.ID] {
+			if link.Slot == models.SportsLinkSlotPrimary {
+				result.SkipReason = "Primary channel already linked"
+				break
+			}
+		}
+		if result.SkipReason == "" {
+			candidates := autoLinkCandidatesForTeam(team, channels)
+			if len(candidates) == 0 {
+				result.SkipReason = "No permanent team channel candidate"
+			} else {
+				best := candidates[0]
+				result.Candidate = &best
+				if len(candidates) > 1 {
+					result.RunnerUpConfidence = candidates[1].Confidence
+				}
+				result.ConfidenceGap = roundSportsConfidence(best.Confidence - result.RunnerUpConfidence)
+				result.Eligible = best.Confidence >= 0.95 ||
+					(best.Confidence >= 0.85 && result.ConfidenceGap >= 0.20)
+				if !result.Eligible {
+					result.SkipReason = "Confidence or lead over runner-up is too low"
+				} else {
+					evaluation.links = append(evaluation.links, models.SportsTeamChannelLink{
+						TeamID: team.ID, ChannelTvgID: best.ChannelTvgID, ChannelName: best.ChannelName,
+						ChannelURL: best.ChannelURL, ChannelLogo: best.ChannelLogo, SourceID: best.SourceID,
+						SourceName: best.SourceName, AutoLinked: true, LinkConfidence: best.Confidence,
+						MatchReason: best.MatchReason,
+					})
+				}
+			}
+		}
+		if result.Eligible {
+			evaluation.preview.EligibleCount++
+		} else {
+			evaluation.preview.SkippedCount++
+		}
+		evaluation.preview.Results = append(evaluation.preview.Results, result)
+	}
+	return evaluation
+}
+
+func (h *SportsLinksHandler) evaluateLeagueAutoLinks(r *http.Request) (sportsAutoLinkEvaluation, error) {
+	league := strings.ToLower(strings.TrimSpace(mux.Vars(r)["leagueId"]))
+	if league == "" {
+		return sportsAutoLinkEvaluation{}, fmt.Errorf("missing league id")
+	}
+	teams, err := h.links.ListTeamsByLeague(r.Context(), league)
+	if err != nil {
+		return sportsAutoLinkEvaluation{}, err
+	}
+	teamIDs := make([]string, len(teams))
+	for i := range teams {
+		teamIDs[i] = teams[i].ID
+	}
+	linksByTeam, err := h.links.GetLinksForTeams(r.Context(), teamIDs)
+	if err != nil {
+		return sportsAutoLinkEvaluation{}, err
+	}
+	var channels []LiveChannel
+	if h.liveHandler != nil {
+		channels, err = h.liveHandler.FetchFilteredChannelsForRequest(r)
+		if err != nil {
+			return sportsAutoLinkEvaluation{}, err
+		}
+	}
+	return evaluateSportsAutoLinks(league, teams, linksByTeam, channels), nil
+}
+
+// PreviewAutoLinks reports exactly which currently-unlinked teams satisfy the conservative
+// permanent-channel confidence rules. It never writes links.
+func (h *SportsLinksHandler) PreviewAutoLinks(w http.ResponseWriter, r *http.Request) {
+	evaluation, err := h.evaluateLeagueAutoLinks(r)
+	if err != nil {
+		log.Printf("[sports-links] PreviewAutoLinks failed: %v", err)
+		http.Error(w, `{"error":"failed to preview automatic links"}`, http.StatusInternalServerError)
+		return
+	}
+	writeSportsJSON(w, evaluation.preview)
+}
+
+// ApplyAutoLinks re-evaluates immediately before inserting. The repository uses one
+// conflict-safe INSERT, so a primary added after preview is preserved rather than replaced.
+func (h *SportsLinksHandler) ApplyAutoLinks(w http.ResponseWriter, r *http.Request) {
+	evaluation, err := h.evaluateLeagueAutoLinks(r)
+	if err != nil {
+		log.Printf("[sports-links] ApplyAutoLinks evaluation failed: %v", err)
+		http.Error(w, `{"error":"failed to evaluate automatic links"}`, http.StatusInternalServerError)
+		return
+	}
+	saved, err := h.links.InsertAutoPrimaryLinks(r.Context(), evaluation.links)
+	if err != nil {
+		log.Printf("[sports-links] ApplyAutoLinks insert failed: %v", err)
+		http.Error(w, `{"error":"failed to apply automatic links"}`, http.StatusInternalServerError)
+		return
+	}
+	for i := range saved {
+		saved[i].Resolved = true
+	}
+	writeSportsJSON(w, map[string]any{"linkedCount": len(saved), "links": saved, "preview": evaluation.preview})
 }
 
 // nonNilLinks ensures a links slice serializes as JSON [] rather than null when empty -
@@ -337,6 +493,8 @@ func (h *SportsLinksHandler) SyncTeamsFromGames(ctx context.Context, games []mod
 				League:       game.League,
 				EspnTeamID:   team.ID,
 				Name:         team.Name,
+				Location:     team.Location,
+				Nickname:     team.Nickname,
 				Abbreviation: team.Abbreviation,
 				LogoURL:      team.LogoURL,
 			})
