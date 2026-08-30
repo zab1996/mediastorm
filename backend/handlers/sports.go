@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -13,6 +14,16 @@ import (
 	"novastream/models"
 	"novastream/services/sports"
 )
+
+// alphaNumOnlyRegex strips everything but letters/digits so broadcast-name matching isn't
+// fooled by punctuation/spacing differences between ESPN's broadcast label and a provider's
+// channel naming (e.g. ESPN's "MLB.TV" vs a channel literally named "MLB TV" or "MLBTV" -
+// a plain substring match on "mlb.tv" would miss both).
+var alphaNumOnlyRegex = regexp.MustCompile(`[^a-z0-9]`)
+
+func normalizeForMatch(s string) string {
+	return alphaNumOnlyRegex.ReplaceAllString(strings.ToLower(s), "")
+}
 
 const sportsRefreshTimeout = 20 * time.Second
 
@@ -162,13 +173,13 @@ func matchGameToChannels(game models.SportsGame, channels []LiveChannel, epgServ
 // matchChannelsByBroadcast is the scoped, per-badge lookup: channel name contains the
 // given broadcast/network name.
 func matchChannelsByBroadcast(channels []LiveChannel, broadcast string) []models.SportsStreamMatch {
-	needle := strings.ToLower(strings.TrimSpace(broadcast))
+	needle := normalizeForMatch(broadcast)
 	matches := make([]models.SportsStreamMatch, 0)
 	if needle == "" {
 		return matches
 	}
 	for _, ch := range channels {
-		if strings.Contains(strings.ToLower(ch.Name), needle) {
+		if strings.Contains(normalizeForMatch(ch.Name), needle) {
 			matches = append(matches, models.SportsStreamMatch{
 				ChannelID:    ch.ID,
 				ChannelName:  ch.Name,
@@ -207,9 +218,9 @@ func matchChannelsByTeamName(game models.SportsGame, channels []LiveChannel, epg
 			if _, alreadyMatched := seen[ch.ID]; alreadyMatched {
 				continue
 			}
-			lowerName := strings.ToLower(ch.Name)
+			normalizedName := normalizeForMatch(ch.Name)
 			for _, needle := range needles {
-				if strings.Contains(lowerName, needle) {
+				if strings.Contains(normalizedName, needle) {
 					matches = append(matches, models.SportsStreamMatch{
 						ChannelID:    ch.ID,
 						ChannelName:  ch.Name,
@@ -293,13 +304,13 @@ func teamNameNeedles(team models.SportsTeam) []string {
 	name := strings.TrimSpace(team.Name)
 	if name != "" {
 		words := strings.Fields(name)
-		nickname := strings.ToLower(words[len(words)-1])
+		nickname := normalizeForMatch(words[len(words)-1])
 		if len(nickname) >= minTeamNeedleLength {
 			needles = append(needles, nickname)
 		}
 	}
 
-	abbr := strings.ToLower(strings.TrimSpace(team.Abbreviation))
+	abbr := normalizeForMatch(team.Abbreviation)
 	if len(abbr) >= minTeamNeedleLength {
 		needles = append(needles, abbr)
 	}
