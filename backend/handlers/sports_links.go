@@ -208,6 +208,7 @@ func evaluateSportsAutoLinks(league string, teams []models.SportsTeamRecord, lin
 		preview: models.SportsAutoLinkPreview{League: league, Results: []models.SportsAutoLinkTeamResult{}},
 		links:   []models.SportsTeamChannelLink{},
 	}
+	channelByKey := buildChannelKeyIndex(channels)
 	for _, team := range teams {
 		result := models.SportsAutoLinkTeamResult{Team: team}
 		for _, link := range linksByTeam[team.ID] {
@@ -217,7 +218,7 @@ func evaluateSportsAutoLinks(league string, teams []models.SportsTeamRecord, lin
 			}
 		}
 		if result.SkipReason == "" {
-			candidates := autoLinkCandidatesForTeam(team, channels)
+			candidates := autoLinkCandidatesForTeam(team, channels, channelByKey)
 			if len(candidates) == 0 {
 				result.SkipReason = "No permanent team channel candidate"
 			} else {

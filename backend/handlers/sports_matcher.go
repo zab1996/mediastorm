@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
@@ -115,7 +116,27 @@ const (
 	sportsLifecycleEnded = "ended"
 )
 
+// normalizeSportsTextCache memoizes normalizeSportsText's (expensive: Unicode NFD
+// decomposition over the full string) result per distinct input. Auto-link preview scores
+// every channel against every team in a league (e.g. 30 teams x tens of thousands of
+// channels on a large Xtream playlist), and the same channel.Name/TvgName gets normalized
+// once per team - without caching, that's the same NFD decomposition repeated dozens of
+// times per channel, which is what made /sports/leagues/{id}/auto-link/preview hang
+// (found by calling it directly against a ~57k-channel test playlist: 30+ seconds, no
+// response). sync.Map since handler requests can run concurrently; unbounded but bounded in
+// practice by the number of distinct channel/team-name strings ever seen (a few MB at most).
+var normalizeSportsTextCache sync.Map
+
 func normalizeSportsText(value string) string {
+	if cached, ok := normalizeSportsTextCache.Load(value); ok {
+		return cached.(string)
+	}
+	result := normalizeSportsTextUncached(value)
+	normalizeSportsTextCache.Store(value, result)
+	return result
+}
+
+func normalizeSportsTextUncached(value string) string {
 	value = norm.NFD.String(strings.ToLower(value))
 	var b strings.Builder
 	space := false
@@ -700,12 +721,21 @@ func isPermanentAutoLinkChannel(channel LiveChannel) bool {
 	return true
 }
 
-func autoLinkCandidatesForTeam(team models.SportsTeamRecord, channels []LiveChannel) []models.SportsChannelCandidate {
-	ranked := rankTeamChannelCandidates(team, channels, "", 0)
-	channelByKey := make(map[string]LiveChannel, len(channels))
+// buildChannelKeyIndex is hoisted out of autoLinkCandidatesForTeam by its caller
+// (evaluateSportsAutoLinks) and built once per request rather than once per team - a
+// league's auto-link preview calls autoLinkCandidatesForTeam once per team (e.g. 30x for
+// MLB), and rebuilding a channels-sized map on every call was pure wasted work at large
+// playlist sizes.
+func buildChannelKeyIndex(channels []LiveChannel) map[string]LiveChannel {
+	index := make(map[string]LiveChannel, len(channels))
 	for _, channel := range channels {
-		channelByKey[channel.SourceID+":"+channel.ID] = channel
+		index[channel.SourceID+":"+channel.ID] = channel
 	}
+	return index
+}
+
+func autoLinkCandidatesForTeam(team models.SportsTeamRecord, channels []LiveChannel, channelByKey map[string]LiveChannel) []models.SportsChannelCandidate {
+	ranked := rankTeamChannelCandidates(team, channels, "", 0)
 	results := make([]models.SportsChannelCandidate, 0, len(ranked))
 	seenBrands := make(map[string]struct{})
 	for _, candidate := range ranked {
