@@ -43,6 +43,18 @@ type Service struct {
 	refreshing  bool
 	lastError   string
 	restoreDone chan struct{}
+
+	// normalizedIDIndex/normalizedNameIndex let findProgramsByChannelMatch resolve most
+	// misses with an O(1) lookup instead of the linear scan it used to always fall back to
+	// (normalizeChannelID(candidate) == normalizeChannelID(every program key), for every
+	// program key, for every miss) - that scan, multiplied by a caller passing many channel
+	// IDs at once (sports auto-link, live search), was slow enough to make those endpoints
+	// hang outright on a large (tens of thousands of channels) playlist. Built once whenever
+	// schedule is (re)assigned, not per lookup. The "contains" partial-match pass in
+	// findProgramsByChannelMatch is unindexed and stays a fallback for the rarer misses that
+	// don't hit either index.
+	normalizedIDIndex   map[string]string
+	normalizedNameIndex map[string]string
 }
 
 type epgXMLTVSource struct {
@@ -110,7 +122,27 @@ func (s *Service) installRestoredSchedule(initial, restored *models.EPGSchedule)
 		return false
 	}
 	s.schedule = restored
+	s.rebuildScheduleIndexLocked()
 	return true
+}
+
+// rebuildScheduleIndexLocked recomputes normalizedIDIndex/normalizedNameIndex from the
+// current s.schedule. Caller must hold s.mu (write lock) - called immediately after every
+// s.schedule reassignment so the indexes never go stale relative to the data they cover.
+func (s *Service) rebuildScheduleIndexLocked() {
+	idIndex := make(map[string]string, len(s.schedule.Programs))
+	for channelID := range s.schedule.Programs {
+		idIndex[normalizeChannelID(channelID)] = channelID
+	}
+	nameIndex := make(map[string]string, len(s.schedule.Channels))
+	for channelID, ch := range s.schedule.Channels {
+		if _, hasPrograms := s.schedule.Programs[channelID]; !hasPrograms {
+			continue
+		}
+		nameIndex[normalizeChannelID(ch.Name)] = channelID
+	}
+	s.normalizedIDIndex = idIndex
+	s.normalizedNameIndex = nameIndex
 }
 
 // countPrograms returns total number of programs across all channels.
@@ -468,6 +500,7 @@ func (s *Service) Refresh(ctx context.Context) error {
 	// Only replace the schedule after the refresh produced usable guide data.
 	s.mu.Lock()
 	s.schedule = newSchedule
+	s.rebuildScheduleIndexLocked()
 	if len(refreshErrors) > 0 {
 		s.lastError = strings.Join(refreshErrors, "; ")
 	} else {
@@ -1000,26 +1033,20 @@ func (s *Service) GetChannelSchedule(channelID string, date time.Time) []models.
 
 // findProgramsByChannelMatch tries to match a channel ID using various strategies.
 func (s *Service) findProgramsByChannelMatch(channelID string) []models.EPGProgram {
-	// Normalize the input channel ID
 	normalizedInput := normalizeChannelID(channelID)
 
-	// Try to find a matching channel by normalized ID
-	for epgChannelID, programs := range s.schedule.Programs {
-		if normalizeChannelID(epgChannelID) == normalizedInput {
-			return programs
-		}
+	// O(1): normalized-ID and normalized-name indexes, built once whenever the schedule is
+	// (re)assigned (rebuildScheduleIndexLocked) instead of scanned per call.
+	if epgChannelID, ok := s.normalizedIDIndex[normalizedInput]; ok {
+		return s.schedule.Programs[epgChannelID]
+	}
+	if epgChannelID, ok := s.normalizedNameIndex[normalizedInput]; ok {
+		return s.schedule.Programs[epgChannelID]
 	}
 
-	// Try matching by channel name
-	for epgChannelID, ch := range s.schedule.Channels {
-		if normalizeChannelID(ch.Name) == normalizedInput {
-			if programs := s.schedule.Programs[epgChannelID]; len(programs) > 0 {
-				return programs
-			}
-		}
-	}
-
-	// Try partial matching - check if input contains or is contained by EPG channel ID
+	// Fallback: partial/substring matching has no cheap index (an input could be a
+	// substring of any EPG ID or vice versa) - only reached for the minority of lookups
+	// that miss both exact indexes above, not for every call.
 	for epgChannelID, programs := range s.schedule.Programs {
 		epgNorm := normalizeChannelID(epgChannelID)
 		if strings.Contains(epgNorm, normalizedInput) || strings.Contains(normalizedInput, epgNorm) {

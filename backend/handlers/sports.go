@@ -30,6 +30,10 @@ func normalizeForMatch(s string) string {
 
 const sportsRefreshTimeout = 20 * time.Second
 
+// maxSearchEPGChannels caps how many channel IDs SearchLiveHub will feed into
+// GetScheduleMultiple - see the call site for why.
+const maxSearchEPGChannels = 1500
+
 // SportsHandler serves ESPN-backed scoreboard/schedule data and matches games to
 // the caller's configured Live TV channels for "what can I watch this on" lookups.
 type SportsHandler struct {
@@ -145,7 +149,12 @@ func (h *SportsHandler) SearchLiveHub(w http.ResponseWriter, r *http.Request) {
 	}
 	livePrograms := make([]models.EPGProgram, 0)
 	upcomingPrograms := make([]models.EPGProgram, 0)
-	if schedule, ok := h.epgService.(sportsScheduleProvider); ok {
+	// GetScheduleMultiple's per-miss fallback (findProgramsByChannelMatch) is now indexed
+	// (see services/epg/service.go rebuildScheduleIndexLocked) instead of a linear scan per
+	// call, which is what made this endpoint hang passing every channel's tvg-id on a large
+	// playlist. Keep a generous cap anyway as defense in depth; above it, channel-name
+	// matches (already computed) still return, just without the EPG-program-title pass.
+	if schedule, ok := h.epgService.(sportsScheduleProvider); ok && len(ids) <= maxSearchEPGChannels {
 		now := time.Now()
 		schedules := schedule.GetScheduleMultiple(ids, now.Add(-time.Hour), now.Add(7*24*time.Hour))
 		for _, programs := range schedules {
