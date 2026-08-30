@@ -1,7 +1,10 @@
 package sports
 
 import (
+	"encoding/json"
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"novastream/models"
@@ -13,6 +16,66 @@ import (
 
 type espnScoreboardResponse struct {
 	Events []espnEvent `json:"events"`
+}
+
+type espnTeamsResponse struct {
+	Sports []struct {
+		Leagues []struct {
+			Teams []struct {
+				Team espnCatalogTeam `json:"team"`
+			} `json:"teams"`
+		} `json:"leagues"`
+	} `json:"sports"`
+}
+
+type espnCatalogTeam struct {
+	ID           string `json:"id"`
+	DisplayName  string `json:"displayName"`
+	Location     string `json:"location"`
+	Name         string `json:"name"`
+	Nickname     string `json:"nickname"`
+	Abbreviation string `json:"abbreviation"`
+	Logos        []struct {
+		Href string `json:"href"`
+	} `json:"logos"`
+}
+
+func espnTeamsToRecords(payload espnTeamsResponse, league League) []models.SportsTeamRecord {
+	var records []models.SportsTeamRecord
+	seen := make(map[string]struct{})
+	for _, sport := range payload.Sports {
+		for _, leaguePayload := range sport.Leagues {
+			for _, entry := range leaguePayload.Teams {
+				team := entry.Team
+				if team.ID == "" || team.DisplayName == "" {
+					continue
+				}
+				if _, exists := seen[team.ID]; exists {
+					continue
+				}
+				seen[team.ID] = struct{}{}
+				nickname := team.Name
+				if nickname == "" {
+					nickname = team.Nickname
+				}
+				logoURL := ""
+				if len(team.Logos) > 0 {
+					logoURL = team.Logos[0].Href
+				}
+				records = append(records, models.SportsTeamRecord{
+					ID:           league.ID + ":" + team.ID,
+					League:       league.ID,
+					EspnTeamID:   team.ID,
+					Name:         team.DisplayName,
+					Location:     team.Location,
+					Nickname:     nickname,
+					Abbreviation: team.Abbreviation,
+					LogoURL:      logoURL,
+				})
+			}
+		}
+	}
+	return records
 }
 
 type espnEvent struct {
@@ -64,10 +127,23 @@ type espnStatusType struct {
 }
 
 type espnCompetitor struct {
-	HomeAway string   `json:"homeAway"` // "home" | "away"
-	Score    string   `json:"score"`
-	Winner   bool     `json:"winner"`
-	Team     espnTeam `json:"team"`
+	HomeAway string          `json:"homeAway"` // "home" | "away"
+	ID       string          `json:"id"`
+	Order    int             `json:"order"`
+	Score    json.RawMessage `json:"score"`
+	Winner   bool            `json:"winner"`
+	Team     espnTeam        `json:"team"`
+	Athlete  *espnAthlete    `json:"athlete"`
+}
+
+type espnAthlete struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	FullName    string `json:"fullName"`
+	ShortName   string `json:"shortName"`
+	Headshot    *struct {
+		Href string `json:"href"`
+	} `json:"headshot"`
 }
 
 type espnTeam struct {
@@ -98,6 +174,46 @@ func espnStatusToGameStatus(t espnStatusType) models.SportsGameStatus {
 	}
 }
 
+func espnScore(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var number float64
+	if json.Unmarshal(raw, &number) == nil {
+		return strconv.FormatFloat(number, 'f', -1, 64)
+	}
+	var object struct {
+		DisplayValue string  `json:"displayValue"`
+		Value        float64 `json:"value"`
+	}
+	if json.Unmarshal(raw, &object) == nil {
+		if object.DisplayValue != "" {
+			return object.DisplayValue
+		}
+		return strconv.FormatFloat(object.Value, 'f', -1, 64)
+	}
+	return ""
+}
+
+func competitorTeam(c espnCompetitor) models.SportsTeam {
+	if c.Athlete != nil {
+		name := c.Athlete.DisplayName
+		if name == "" {
+			name = c.Athlete.FullName
+		}
+		logo := ""
+		if c.Athlete.Headshot != nil {
+			logo = c.Athlete.Headshot.Href
+		}
+		return models.SportsTeam{ID: c.Athlete.ID, Name: name, Abbreviation: c.Athlete.ShortName, LogoURL: logo, Score: espnScore(c.Score), Winner: c.Winner}
+	}
+	return models.SportsTeam{ID: c.Team.ID, Name: c.Team.DisplayName, Location: c.Team.Location, Nickname: c.Team.Name, Abbreviation: c.Team.Abbreviation, LogoURL: c.Team.Logo, Score: espnScore(c.Score), Winner: c.Winner}
+}
+
 func espnEventToGame(event espnEvent, league League) (models.SportsGame, bool) {
 	if len(event.Competitions) == 0 {
 		return models.SportsGame{}, false
@@ -111,6 +227,23 @@ func espnEventToGame(event espnEvent, league League) (models.SportsGame, bool) {
 		} else if c.HomeAway == "away" {
 			away = c
 		}
+	}
+	if home.Team.ID == "" && home.Athlete == nil && len(comp.Competitors) > 0 {
+		home = comp.Competitors[0]
+	}
+	if away.Team.ID == "" && away.Athlete == nil && len(comp.Competitors) > 1 {
+		away = comp.Competitors[1]
+	}
+	homeTeam := competitorTeam(home)
+	awayTeam := competitorTeam(away)
+	participants := make([]models.SportsParticipant, 0, len(comp.Competitors))
+	for index, candidate := range comp.Competitors {
+		team := competitorTeam(candidate)
+		position := candidate.Order
+		if position == 0 {
+			position = index + 1
+		}
+		participants = append(participants, models.SportsParticipant{ID: team.ID, Name: team.Name, Abbreviation: team.Abbreviation, LogoURL: team.LogoURL, Score: team.Score, Position: position, Winner: team.Winner})
 	}
 
 	broadcasts := make([]string, 0, len(comp.Broadcasts))
@@ -130,34 +263,22 @@ func espnEventToGame(event espnEvent, league League) (models.SportsGame, bool) {
 
 	game := models.SportsGame{
 		ID:           event.ID,
+		Title:        strings.TrimSpace(event.Name),
+		EventKind:    league.EventKind,
 		League:       league.ID,
 		Sport:        league.Sport,
 		StartTime:    parseESPNDate(event.Date),
 		Status:       espnStatusToGameStatus(comp.Status.Type),
 		StatusDetail: statusDetail,
 		Clock:        comp.Status.DisplayClock,
-		HomeTeam: models.SportsTeam{
-			ID:           home.Team.ID,
-			Name:         home.Team.DisplayName,
-			Location:     home.Team.Location,
-			Nickname:     home.Team.Name,
-			Abbreviation: home.Team.Abbreviation,
-			LogoURL:      home.Team.Logo,
-			Score:        home.Score,
-			Winner:       home.Winner,
-		},
-		AwayTeam: models.SportsTeam{
-			ID:           away.Team.ID,
-			Name:         away.Team.DisplayName,
-			Location:     away.Team.Location,
-			Nickname:     away.Team.Name,
-			Abbreviation: away.Team.Abbreviation,
-			LogoURL:      away.Team.Logo,
-			Score:        away.Score,
-			Winner:       away.Winner,
-		},
-		Broadcasts: broadcasts,
-		VenueName:  venue,
+		HomeTeam:     homeTeam,
+		AwayTeam:     awayTeam,
+		Broadcasts:   broadcasts,
+		VenueName:    venue,
+		Participants: participants,
+	}
+	if game.Title == "" {
+		game.Title = fmt.Sprintf("%s vs %s", awayTeam.Name, homeTeam.Name)
 	}
 	if comp.Status.Period > 0 {
 		game.Period = periodLabel(comp.Status.Period, league.Sport)

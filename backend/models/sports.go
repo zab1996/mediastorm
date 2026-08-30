@@ -25,25 +25,60 @@ const (
 
 // SportsGame represents a single scheduled, live, or completed game.
 type SportsGame struct {
-	ID           string           `json:"id"`
-	League       string           `json:"league"` // e.g. "mlb", "nfl", "nba", "nhl"
-	Sport        string           `json:"sport"`  // e.g. "baseball"
-	StartTime    time.Time        `json:"startTime"`
-	Status       SportsGameStatus `json:"status"`
-	StatusDetail string           `json:"statusDetail,omitempty"` // e.g. "9th - 0:00", "FINAL", "7:05 PM"
-	Period       string           `json:"period,omitempty"`
-	Clock        string           `json:"clock,omitempty"`
-	HomeTeam     SportsTeam       `json:"homeTeam"`
-	AwayTeam     SportsTeam       `json:"awayTeam"`
-	Broadcasts   []string         `json:"broadcasts,omitempty"` // e.g. ["ESPN", "MLB.TV"]
-	VenueName    string           `json:"venue,omitempty"`
+	ID           string              `json:"id"`
+	Title        string              `json:"title,omitempty"`
+	EventKind    string              `json:"eventKind,omitempty"`
+	League       string              `json:"league"` // e.g. "mlb", "nfl", "nba", "nhl"
+	Sport        string              `json:"sport"`  // e.g. "baseball"
+	StartTime    time.Time           `json:"startTime"`
+	Status       SportsGameStatus    `json:"status"`
+	StatusDetail string              `json:"statusDetail,omitempty"` // e.g. "9th - 0:00", "FINAL", "7:05 PM"
+	Period       string              `json:"period,omitempty"`
+	Clock        string              `json:"clock,omitempty"`
+	HomeTeam     SportsTeam          `json:"homeTeam"`
+	AwayTeam     SportsTeam          `json:"awayTeam"`
+	Broadcasts   []string            `json:"broadcasts,omitempty"` // e.g. ["ESPN", "MLB.TV"]
+	VenueName    string              `json:"venue,omitempty"`
+	Participants []SportsParticipant `json:"participants,omitempty"`
 }
 
 // SportsLeague identifies a supported league/competition.
 type SportsLeague struct {
-	ID    string `json:"id"`    // e.g. "mlb"
-	Name  string `json:"name"`  // e.g. "MLB"
-	Sport string `json:"sport"` // e.g. "baseball"
+	ID            string `json:"id"` // e.g. "mlb"
+	Name          string `json:"name"`
+	Sport         string `json:"sport"`
+	Category      string `json:"category"`
+	EventKind     string `json:"eventKind"` // matchup | fight-card | tournament | race
+	SupportsTeams bool   `json:"supportsTeams"`
+	Enabled       bool   `json:"enabled"`
+}
+
+// SportsParticipant and SportsEvent are the additive, generalized Sports Hub contract.
+// The legacy SportsGame endpoints remain intact for existing mobile clients.
+type SportsParticipant struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Abbreviation string `json:"abbreviation,omitempty"`
+	LogoURL      string `json:"logoUrl,omitempty"`
+	Score        string `json:"score,omitempty"`
+	Position     int    `json:"position,omitempty"`
+	Winner       bool   `json:"winner,omitempty"`
+}
+
+type SportsEvent struct {
+	ID           string              `json:"id"`
+	Title        string              `json:"title"`
+	League       string              `json:"league"`
+	Sport        string              `json:"sport"`
+	EventKind    string              `json:"eventKind"`
+	StartTime    time.Time           `json:"startTime"`
+	Status       SportsGameStatus    `json:"status"`
+	StatusDetail string              `json:"statusDetail,omitempty"`
+	Participants []SportsParticipant `json:"participants"`
+	SubEvents    []SportsEvent       `json:"subEvents,omitempty"`
+	Broadcasts   []string            `json:"broadcasts,omitempty"`
+	VenueName    string              `json:"venue,omitempty"`
+	Featured     bool                `json:"featured,omitempty"`
 }
 
 // SportsStreamMatch is one candidate Live TV channel/stream for watching a given game,
@@ -93,7 +128,8 @@ type SportsStatus struct {
 
 // SportsTeamRecord is a persisted team identity (Postgres sports_teams table), keyed on
 // league+ESPN team ID rather than name so it survives the team being renamed/rebranded
-// upstream. Populated lazily as the scoreboard poller observes teams playing games.
+// upstream. Populated from ESPN's complete league team catalog, with scoreboard teams as
+// an additional fallback so the management UI is complete even on light schedule days.
 type SportsTeamRecord struct {
 	ID           string    `json:"id"` // "{league}:{espnTeamId}"
 	League       string    `json:"league"`
@@ -135,6 +171,7 @@ type SportsAutoLinkTeamResult struct {
 
 type SportsAutoLinkPreview struct {
 	League        string                     `json:"league"`
+	Message       string                     `json:"message,omitempty"`
 	EligibleCount int                        `json:"eligibleCount"`
 	SkippedCount  int                        `json:"skippedCount"`
 	Results       []SportsAutoLinkTeamResult `json:"results"`

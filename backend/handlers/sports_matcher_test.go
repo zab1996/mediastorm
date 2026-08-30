@@ -115,6 +115,17 @@ func TestTeamChannelSuggestionScores(t *testing.T) {
 	}
 }
 
+func TestOnlyStrongSportsMatches(t *testing.T) {
+	matches := []models.SportsStreamMatch{
+		{ChannelID: "strong", Confidence: 0.85, ConfidenceTier: "strong"},
+		{ChannelID: "possible", Confidence: 0.84, ConfidenceTier: "possible"},
+	}
+	got := onlyStrongSportsMatches(matches)
+	if len(got) != 1 || got[0].ChannelID != "strong" {
+		t.Fatalf("strong matches = %#v", got)
+	}
+}
+
 func TestManualSearchKeepsZeroConfidenceResult(t *testing.T) {
 	team := testTeamRecord("Washington Nationals", "Washington", "Nationals", "WSH")
 	channels := []LiveChannel{{ID: "manual", Name: "My Custom Baseball Feed", URL: "https://example/manual"}}

@@ -5,12 +5,16 @@ package sports
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,14 +27,18 @@ const (
 	sportsCacheDir       = "sports"
 	sportsCacheFile      = "scoreboard.json"
 	espnScoreboardURLFmt = "https://site.api.espn.com/apis/site/v2/sports/%s/%s/scoreboard"
+	espnTeamsURLFmt      = "https://site.api.espn.com/apis/site/v2/sports/%s/%s/teams?limit=1000"
 )
 
 // League describes one supported league's ESPN sport/league slug pair.
 type League struct {
-	ID    string // e.g. "mlb"
-	Name  string // e.g. "MLB"
-	Sport string // ESPN "sport" path segment, e.g. "baseball"
-	Slug  string // ESPN "league" path segment, e.g. "mlb"
+	ID            string
+	Name          string
+	Sport         string
+	Slug          string
+	Category      string
+	EventKind     string
+	SupportsTeams bool
 }
 
 // LeagueCatalog is every league this service knows how to fetch from ESPN. Not every
@@ -39,15 +47,67 @@ type League struct {
 // shape this package models (models.SportsGame) - e.g. motorsports (grid of drivers, not two
 // teams) would need a different data model and isn't included here.
 var LeagueCatalog = []League{
-	{ID: "mlb", Name: "MLB", Sport: "baseball", Slug: "mlb"},
-	{ID: "nfl", Name: "NFL", Sport: "football", Slug: "nfl"},
-	{ID: "nba", Name: "NBA", Sport: "basketball", Slug: "nba"},
-	{ID: "nhl", Name: "NHL", Sport: "hockey", Slug: "nhl"},
-	{ID: "eng.1", Name: "Premier League", Sport: "soccer", Slug: "eng.1"},
+	{ID: "nfl", Name: "NFL", Sport: "football", Slug: "nfl", Category: "football", EventKind: "matchup", SupportsTeams: true},
+	{ID: "college-football", Name: "NCAAF", Sport: "football", Slug: "college-football", Category: "football", EventKind: "matchup", SupportsTeams: true},
+	{ID: "nba", Name: "NBA", Sport: "basketball", Slug: "nba", Category: "basketball", EventKind: "matchup", SupportsTeams: true},
+	{ID: "mens-college-basketball", Name: "NCAAM", Sport: "basketball", Slug: "mens-college-basketball", Category: "basketball", EventKind: "matchup", SupportsTeams: true},
+	{ID: "womens-college-basketball", Name: "NCAAW", Sport: "basketball", Slug: "womens-college-basketball", Category: "basketball", EventKind: "matchup", SupportsTeams: true},
+	{ID: "wnba", Name: "WNBA", Sport: "basketball", Slug: "wnba", Category: "basketball", EventKind: "matchup", SupportsTeams: true},
+	{ID: "mlb", Name: "MLB", Sport: "baseball", Slug: "mlb", Category: "baseball", EventKind: "matchup", SupportsTeams: true},
+	{ID: "nhl", Name: "NHL", Sport: "hockey", Slug: "nhl", Category: "hockey", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-fifa.world", Name: "FIFA World Cup", Sport: "soccer", Slug: "fifa.world", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-fifa.wwc", Name: "FIFA Women's World Cup", Sport: "soccer", Slug: "fifa.wwc", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-eng.1", Name: "Premier League", Sport: "soccer", Slug: "eng.1", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-eng.2", Name: "Championship", Sport: "soccer", Slug: "eng.2", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-esp.1", Name: "La Liga", Sport: "soccer", Slug: "esp.1", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-ger.1", Name: "Bundesliga", Sport: "soccer", Slug: "ger.1", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-ita.1", Name: "Serie A", Sport: "soccer", Slug: "ita.1", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-fra.1", Name: "Ligue 1", Sport: "soccer", Slug: "fra.1", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-usa.1", Name: "MLS", Sport: "soccer", Slug: "usa.1", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-usa.nwsl", Name: "NWSL", Sport: "soccer", Slug: "usa.nwsl", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-usa.nwsl.cup", Name: "NWSL Challenge Cup", Sport: "soccer", Slug: "usa.nwsl.cup", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-uefa.champions", Name: "Champions League", Sport: "soccer", Slug: "uefa.champions", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-uefa.europa", Name: "Europa League", Sport: "soccer", Slug: "uefa.europa", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-uefa.europa.conf", Name: "Conference League", Sport: "soccer", Slug: "uefa.europa.conf", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-mex.1", Name: "Liga MX", Sport: "soccer", Slug: "mex.1", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-ned.1", Name: "Eredivisie", Sport: "soccer", Slug: "ned.1", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "soccer-por.1", Name: "Primeira Liga", Sport: "soccer", Slug: "por.1", Category: "soccer", EventKind: "matchup", SupportsTeams: true},
+	{ID: "ufc", Name: "UFC", Sport: "mma", Slug: "ufc", Category: "mma", EventKind: "fight-card"},
+	{ID: "pga", Name: "PGA Tour", Sport: "golf", Slug: "pga", Category: "golf", EventKind: "tournament"},
+	{ID: "lpga", Name: "LPGA", Sport: "golf", Slug: "lpga", Category: "golf", EventKind: "tournament"},
+	{ID: "atp", Name: "ATP Tour", Sport: "tennis", Slug: "atp", Category: "tennis", EventKind: "matchup"},
+	{ID: "wta", Name: "WTA Tour", Sport: "tennis", Slug: "wta", Category: "tennis", EventKind: "matchup"},
+	{ID: "f1", Name: "Formula 1", Sport: "racing", Slug: "f1", Category: "racing", EventKind: "race"},
+	{ID: "nascar", Name: "NASCAR Cup", Sport: "racing", Slug: "nascar-premier", Category: "racing", EventKind: "race"},
+	{ID: "indycar", Name: "IndyCar", Sport: "racing", Slug: "irl", Category: "racing", EventKind: "race"},
+	{ID: "rugby-180659", Name: "Six Nations", Sport: "rugby", Slug: "180659", Category: "rugby", EventKind: "matchup", SupportsTeams: true},
+	{ID: "rugby-164205", Name: "Rugby World Cup", Sport: "rugby", Slug: "164205", Category: "rugby", EventKind: "matchup", SupportsTeams: true},
+	{ID: "rugby-267979", Name: "Premiership", Sport: "rugby", Slug: "267979", Category: "rugby", EventKind: "matchup", SupportsTeams: true},
+	{ID: "rugby-242041", Name: "Super Rugby", Sport: "rugby", Slug: "242041", Category: "rugby", EventKind: "matchup", SupportsTeams: true},
+	{ID: "rugby-270559", Name: "Top 14", Sport: "rugby", Slug: "270559", Category: "rugby", EventKind: "matchup", SupportsTeams: true},
+	{ID: "rugby-league-3", Name: "NRL", Sport: "rugby-league", Slug: "3", Category: "rugby-league", EventKind: "matchup", SupportsTeams: true},
 }
 
 // DefaultLeagues is the enabled-by-default subset of LeagueCatalog (the original MVP set).
-var DefaultLeagues = LeagueCatalog[:4]
+var defaultLeagueIDs = []string{"nfl", "nba", "mlb", "nhl", "ufc"}
+
+func defaultLeagues() []League {
+	return selectLeagues(defaultLeagueIDs)
+}
+
+func selectLeagues(ids []string) []League {
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+	out := make([]League, 0, len(ids))
+	for _, league := range LeagueCatalog {
+		if _, ok := wanted[league.ID]; ok {
+			out = append(out, league)
+		}
+	}
+	return out
+}
 
 // Service fetches and caches ESPN scoreboard data.
 type Service struct {
@@ -57,6 +117,7 @@ type Service struct {
 
 	mu          sync.RWMutex
 	games       map[string][]models.SportsGame // league ID -> games
+	teamCatalog map[string][]models.SportsTeamRecord
 	lastUpdated time.Time
 	refreshing  bool
 	lastError   string
@@ -68,9 +129,10 @@ func NewService(storageDir string) *Service {
 		storageDir: storageDir,
 		client: apiusage.TrackClient(&http.Client{
 			Timeout: defaultHTTPTimeout,
-		}, "Sports", "ESPN scoreboard fetch"),
-		leagues: DefaultLeagues,
-		games:   make(map[string][]models.SportsGame),
+		}, "Sports", "ESPN sports fetch"),
+		leagues:     defaultLeagues(),
+		games:       make(map[string][]models.SportsGame),
+		teamCatalog: make(map[string][]models.SportsTeamRecord),
 	}
 
 	cacheDir := filepath.Join(storageDir, sportsCacheDir)
@@ -85,15 +147,142 @@ func NewService(storageDir string) *Service {
 	return s
 }
 
+// EnsureTeamCatalog fetches the complete team list for every enabled league that has not
+// already been fetched during this process. Scoreboards only contain teams playing in the
+// current date window, so they cannot populate the Manage Team Channels screen by
+// themselves (one NBA game would otherwise produce a two-team list).
+//
+// Successful league catalogs are retained in memory. Failed leagues are retried on the
+// next refresh tick, while any successful results are still returned to the caller.
+func (s *Service) EnsureTeamCatalog(ctx context.Context) ([]models.SportsTeamRecord, error) {
+	s.mu.RLock()
+	leagues := append([]League(nil), s.leagues...)
+	s.mu.RUnlock()
+
+	var firstErr error
+	var resultMu sync.Mutex
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 4)
+	for _, league := range leagues {
+		if !league.SupportsTeams {
+			continue
+		}
+		s.mu.RLock()
+		loaded := len(s.teamCatalog[league.ID]) > 0
+		s.mu.RUnlock()
+		if loaded {
+			continue
+		}
+		league := league
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+			teams, err := s.fetchLeagueTeams(ctx, league)
+			if err != nil {
+				log.Printf("[sports] team catalog fetch failed for %s: %v", league.ID, err)
+				resultMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				resultMu.Unlock()
+				return
+			}
+			s.mu.Lock()
+			s.teamCatalog[league.ID] = teams
+			s.mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	s.mu.RLock()
+	var all []models.SportsTeamRecord
+	for _, league := range leagues {
+		all = append(all, s.teamCatalog[league.ID]...)
+	}
+	s.mu.RUnlock()
+	return all, firstErr
+}
+
 // Leagues returns the currently enabled/tracked leagues.
 func (s *Service) Leagues() []models.SportsLeague {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]models.SportsLeague, len(s.leagues))
-	for i, l := range s.leagues {
-		out[i] = models.SportsLeague{ID: l.ID, Name: l.Name, Sport: l.Sport}
+	enabled := make(map[string]struct{}, len(s.leagues))
+	for _, l := range s.leagues {
+		enabled[l.ID] = struct{}{}
+	}
+	out := make([]models.SportsLeague, len(LeagueCatalog))
+	for i, l := range LeagueCatalog {
+		_, isEnabled := enabled[l.ID]
+		out[i] = models.SportsLeague{ID: l.ID, Name: l.Name, Sport: l.Sport, Category: l.Category, EventKind: l.EventKind, SupportsTeams: l.SupportsTeams, Enabled: isEnabled}
 	}
 	return out
+}
+
+// League returns catalog metadata even when the league is currently disabled.
+func (s *Service) League(id string) (League, bool) {
+	for _, league := range LeagueCatalog {
+		if league.ID == id {
+			return league, true
+		}
+	}
+	return League{}, false
+}
+
+func (s *Service) ClearLogoCache() error {
+	dir := filepath.Join(s.storageDir, sportsCacheDir, "logos")
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	return os.MkdirAll(dir, 0o755)
+}
+
+// GetCachedLogo keeps ESPN sports artwork available locally and only permits known CDN
+// hosts, avoiding an open image proxy/SSRF surface.
+func (s *Service) GetCachedLogo(ctx context.Context, rawURL string) ([]byte, string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" {
+		return nil, "", fmt.Errorf("invalid sports logo URL")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "a.espncdn.com" && host != "a1.espncdn.com" && host != "secure.espncdn.com" {
+		return nil, "", fmt.Errorf("sports logo host not allowed")
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(rawURL)))
+	dir := filepath.Join(s.storageDir, sportsCacheDir, "logos")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, "", err
+	}
+	path := filepath.Join(dir, hash+".img")
+	if data, readErr := os.ReadFile(path); readErr == nil {
+		return data, http.DetectContentType(data), nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("sports logo status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, (5<<20)+1))
+	if err != nil || len(data) > 5<<20 {
+		return nil, "", fmt.Errorf("sports logo exceeds size limit")
+	}
+	contentType := http.DetectContentType(data)
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, "", fmt.Errorf("sports logo is not an image")
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return nil, "", err
+	}
+	return data, contentType, nil
 }
 
 // SetEnabledLeagueIDs replaces the set of leagues this service polls/serves, filtered from
@@ -114,7 +303,7 @@ func (s *Service) SetEnabledLeagueIDs(ids []string) {
 		}
 	}
 	if len(next) == 0 {
-		next = append([]League(nil), DefaultLeagues...)
+		next = defaultLeagues()
 	}
 	s.mu.Lock()
 	s.leagues = next
@@ -202,20 +391,36 @@ func (s *Service) Refresh(ctx context.Context) error {
 
 	nextGames := make(map[string][]models.SportsGame, len(leagues))
 	var firstErr error
+	var resultMu sync.Mutex
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 4)
 	for _, league := range leagues {
-		games, err := s.fetchLeagueScoreboard(ctx, league)
-		if err != nil {
-			log.Printf("[sports] scoreboard fetch failed for %s: %v", league.ID, err)
-			if firstErr == nil {
-				firstErr = err
+		league := league
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+			games, err := s.fetchLeagueScoreboard(ctx, league)
+			if err != nil {
+				log.Printf("[sports] scoreboard fetch failed for %s: %v", league.ID, err)
+				s.mu.RLock()
+				games = s.games[league.ID]
+				s.mu.RUnlock()
+				resultMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				nextGames[league.ID] = games
+				resultMu.Unlock()
+				return
 			}
-			s.mu.RLock()
-			nextGames[league.ID] = s.games[league.ID] // keep stale data for this league on error
-			s.mu.RUnlock()
-			continue
-		}
-		nextGames[league.ID] = games
+			resultMu.Lock()
+			nextGames[league.ID] = games
+			resultMu.Unlock()
+		}()
 	}
+	wg.Wait()
 
 	s.mu.Lock()
 	s.games = nextGames
@@ -263,6 +468,34 @@ func (s *Service) fetchLeagueScoreboard(ctx context.Context, league League) ([]m
 		}
 	}
 	return games, nil
+}
+
+func (s *Service) fetchLeagueTeams(ctx context.Context, league League) ([]models.SportsTeamRecord, error) {
+	endpoint := fmt.Sprintf(espnTeamsURLFmt, league.Sport, league.Slug)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("espn teams %s: status %d", league.ID, resp.StatusCode)
+	}
+
+	var payload espnTeamsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode espn teams %s: %w", league.ID, err)
+	}
+	teams := espnTeamsToRecords(payload, league)
+	if len(teams) == 0 {
+		return nil, fmt.Errorf("espn teams %s: empty team catalog", league.ID)
+	}
+	return teams, nil
 }
 
 func (s *Service) saveToDisk() error {
