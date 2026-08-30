@@ -45,7 +45,7 @@ type SportsLeague struct {
 }
 
 // SportsStreamMatch is one candidate Live TV channel/stream for watching a given game,
-// found by heuristically matching the game's broadcasts/teams against the user's
+// found by heuristically matching the game's teams/broadcasts against the user's
 // configured Live TV channels and EPG now-playing data. Best-effort, not authoritative.
 type SportsStreamMatch struct {
 	ChannelID    string `json:"channelId"`
@@ -56,7 +56,9 @@ type SportsStreamMatch struct {
 	SourceID     string `json:"sourceId,omitempty"`
 	SourceName   string `json:"sourceName,omitempty"`
 	ProgramTitle string `json:"programTitle,omitempty"`
-	MatchedOn    string `json:"matchedOn"` // "broadcast" | "epg-title"
+	MatchedOn    string `json:"matchedOn"`             // "broadcast" | "team-name" | "epg-title"
+	Broadcast    string `json:"broadcast,omitempty"`   // set when MatchedOn == "broadcast": which broadcast name matched
+	MatchedTeam  string `json:"matchedTeam,omitempty"` // set when MatchedOn == "team-name" or "epg-title": which team's name matched
 }
 
 // SportsStatus reports the health of the sports scoreboard service.

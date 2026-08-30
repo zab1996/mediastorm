@@ -86,10 +86,15 @@ func (h *SportsHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"refresh started"}`))
 }
 
-// GetGameStreams heuristically matches a game to candidate channels/streams from the
-// caller's configured Live TV sources - "List Streams Here" support. Best-effort: matches
-// on broadcast name vs channel name, then falls back to EPG now-playing titles containing
-// both team names. Not authoritative; results are ranked by confidence, not guaranteed correct.
+// GetGameStreams finds candidate channels/streams for watching a game - "List Streams
+// Here" support. Two modes, chosen by the caller (a specific broadcast badge vs. the main
+// "List Streams Here" action - see components/sports/GameScoreCard.tsx):
+//   - ?broadcast=<name>: scoped lookup, only channels whose name contains that one
+//     broadcast/network name (e.g. tapping a "Peacock" badge).
+//   - no broadcast param: searches the two team names (and EPG now-playing titles)
+//     separately, since matching every channel against every broadcast name by default
+//     was too broad (e.g. returned unrelated VOD-style channels that merely contain
+//     "Peacock" in their name). Not authoritative; results are heuristic, not guaranteed.
 func (h *SportsHandler) GetGameStreams(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(mux.Vars(r)["id"])
 	if id == "" {
@@ -114,7 +119,8 @@ func (h *SportsHandler) GetGameStreams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	matches := matchGameToChannels(game, channels, h.epgService)
+	broadcastFilter := strings.TrimSpace(r.URL.Query().Get("broadcast"))
+	matches := matchGameToChannels(game, channels, h.epgService, broadcastFilter)
 	writeSportsJSON(w, map[string]any{"streams": matches})
 }
 
@@ -131,36 +137,93 @@ func writeSportsJSON(w http.ResponseWriter, v any) {
 }
 
 // matchGameToChannels finds Live TV channels plausibly carrying the given game.
-// Two matching strategies, ranked by confidence:
-//  1. broadcast: channel name contains one of the game's broadcast names (e.g. "ESPN", "MLB.TV").
-//  2. epg-title: channel's current/next EPG program title contains both team names.
-func matchGameToChannels(game models.SportsGame, channels []LiveChannel, epgService LiveEPGNowPlayingProvider) []models.SportsStreamMatch {
-	var matches []models.SportsStreamMatch
-	seen := make(map[string]struct{})
+//
+// If broadcastFilter is non-empty (a specific broadcast badge was tapped), this does a
+// single scoped pass: channel name contains that one broadcast/network name. Nothing else
+// is matched - this is meant to answer "which of my channels look like this network",
+// not "which of my channels are related to this game" (see below).
+//
+// If broadcastFilter is empty (the main "List Streams Here" action), it searches by team
+// name instead of broadcast name, since matching every channel against every broadcast
+// name by default was too broad - e.g. tapping "Peacock" on a game used to return every
+// channel with "peacock" in its name, including unrelated VOD-style channels. Two strategies,
+// ranked by confidence, each tagged with which team matched (MatchedTeam) so callers can
+// group results per team:
+//  1. team-name: channel name contains the team's nickname (last word of its full name,
+//     e.g. "Marlins" from "Miami Marlins") or abbreviation.
+//  2. epg-title: channel's current EPG program title contains both team names.
+func matchGameToChannels(game models.SportsGame, channels []LiveChannel, epgService LiveEPGNowPlayingProvider, broadcastFilter string) []models.SportsStreamMatch {
+	if broadcastFilter != "" {
+		return matchChannelsByBroadcast(channels, broadcastFilter)
+	}
+	return matchChannelsByTeamName(game, channels, epgService)
+}
 
-	broadcastNeedles := make([]string, 0, len(game.Broadcasts))
-	for _, b := range game.Broadcasts {
-		if b = strings.TrimSpace(b); b != "" {
-			broadcastNeedles = append(broadcastNeedles, strings.ToLower(b))
+// matchChannelsByBroadcast is the scoped, per-badge lookup: channel name contains the
+// given broadcast/network name.
+func matchChannelsByBroadcast(channels []LiveChannel, broadcast string) []models.SportsStreamMatch {
+	needle := strings.ToLower(strings.TrimSpace(broadcast))
+	matches := make([]models.SportsStreamMatch, 0)
+	if needle == "" {
+		return matches
+	}
+	for _, ch := range channels {
+		if strings.Contains(strings.ToLower(ch.Name), needle) {
+			matches = append(matches, models.SportsStreamMatch{
+				ChannelID:    ch.ID,
+				ChannelName:  ch.Name,
+				ChannelURL:   ch.URL,
+				ChannelLogo:  ch.Logo,
+				ChannelTvgID: ch.TvgID,
+				SourceID:     ch.SourceID,
+				SourceName:   ch.SourceName,
+				MatchedOn:    "broadcast",
+				Broadcast:    broadcast,
+			})
 		}
 	}
+	return matches
+}
 
-	for _, ch := range channels {
-		lowerName := strings.ToLower(ch.Name)
-		for _, needle := range broadcastNeedles {
-			if strings.Contains(lowerName, needle) {
-				matches = append(matches, models.SportsStreamMatch{
-					ChannelID:    ch.ID,
-					ChannelName:  ch.Name,
-					ChannelURL:   ch.URL,
-					ChannelLogo:  ch.Logo,
-					ChannelTvgID: ch.TvgID,
-					SourceID:     ch.SourceID,
-					SourceName:   ch.SourceName,
-					MatchedOn:    "broadcast",
-				})
-				seen[ch.ID] = struct{}{}
-				break
+// minTeamNeedleLength avoids matching on very short nicknames/abbreviations (e.g. a
+// 2-letter abbreviation) that would produce mostly false positives against arbitrary
+// channel names.
+const minTeamNeedleLength = 4
+
+// matchChannelsByTeamName is the default "List Streams Here" lookup: searches each
+// team's name/nickname/abbreviation and current EPG program title separately, rather than
+// matching against the game's broadcast list.
+func matchChannelsByTeamName(game models.SportsGame, channels []LiveChannel, epgService LiveEPGNowPlayingProvider) []models.SportsStreamMatch {
+	matches := make([]models.SportsStreamMatch, 0)
+	seen := make(map[string]struct{})
+
+	teams := []models.SportsTeam{game.HomeTeam, game.AwayTeam}
+	for _, team := range teams {
+		needles := teamNameNeedles(team)
+		if len(needles) == 0 {
+			continue
+		}
+		for _, ch := range channels {
+			if _, alreadyMatched := seen[ch.ID]; alreadyMatched {
+				continue
+			}
+			lowerName := strings.ToLower(ch.Name)
+			for _, needle := range needles {
+				if strings.Contains(lowerName, needle) {
+					matches = append(matches, models.SportsStreamMatch{
+						ChannelID:    ch.ID,
+						ChannelName:  ch.Name,
+						ChannelURL:   ch.URL,
+						ChannelLogo:  ch.Logo,
+						ChannelTvgID: ch.TvgID,
+						SourceID:     ch.SourceID,
+						SourceName:   ch.SourceName,
+						MatchedOn:    "team-name",
+						MatchedTeam:  team.Name,
+					})
+					seen[ch.ID] = struct{}{}
+					break
+				}
 			}
 		}
 	}
@@ -217,8 +280,29 @@ func matchGameToChannels(game models.SportsGame, channels []LiveChannel, epgServ
 		}
 	}
 
-	if matches == nil {
-		matches = []models.SportsStreamMatch{}
-	}
 	return matches
+}
+
+// teamNameNeedles derives the lowercase substrings to search channel names for: the
+// team's nickname (last word of its full display name, e.g. "Marlins" from "Miami
+// Marlins") and its abbreviation, each only if long enough to avoid mostly-false-positive
+// matches against arbitrary channel names.
+func teamNameNeedles(team models.SportsTeam) []string {
+	var needles []string
+
+	name := strings.TrimSpace(team.Name)
+	if name != "" {
+		words := strings.Fields(name)
+		nickname := strings.ToLower(words[len(words)-1])
+		if len(nickname) >= minTeamNeedleLength {
+			needles = append(needles, nickname)
+		}
+	}
+
+	abbr := strings.ToLower(strings.TrimSpace(team.Abbreviation))
+	if len(abbr) >= minTeamNeedleLength {
+		needles = append(needles, abbr)
+	}
+
+	return needles
 }
