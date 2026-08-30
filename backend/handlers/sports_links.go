@@ -111,7 +111,7 @@ func (h *SportsLinksHandler) GetTeams(w http.ResponseWriter, r *http.Request) {
 		for i := range links {
 			markResolved(&links[i], byTvgID, byName)
 		}
-		result = append(result, models.SportsTeamWithLinks{SportsTeamRecord: t, Links: links})
+		result = append(result, models.SportsTeamWithLinks{SportsTeamRecord: t, Links: nonNilLinks(links)})
 	}
 	writeSportsJSON(w, map[string]any{"teams": result})
 }
@@ -148,7 +148,18 @@ func (h *SportsLinksHandler) GetTeamLinks(w http.ResponseWriter, r *http.Request
 	for i := range links {
 		markResolved(&links[i], byTvgID, byName)
 	}
-	writeSportsJSON(w, map[string]any{"links": links})
+	writeSportsJSON(w, map[string]any{"links": nonNilLinks(links)})
+}
+
+// nonNilLinks ensures a links slice serializes as JSON [] rather than null when empty -
+// repository methods return nil for "no rows", but Go's nil-slice-marshals-to-null default
+// forces every frontend consumer to null-check before .filter()/.find()/.map() rather than
+// treating "no links yet" the same as "links: []".
+func nonNilLinks(links []models.SportsTeamChannelLink) []models.SportsTeamChannelLink {
+	if links == nil {
+		return []models.SportsTeamChannelLink{}
+	}
+	return links
 }
 
 // SetPrimaryLink sets (or replaces) a team's primary channel.
