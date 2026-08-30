@@ -910,16 +910,20 @@ func main() {
 		}
 	}
 
-	// Create Sports service and handler (ESPN-backed live scores + game-to-stream matching)
+	// Create Sports service and handlers (ESPN-backed live scores + game-to-stream
+	// matching, plus the "Manage Team Channels" links CRUD).
 	sportsService := sports.NewService(settings.Cache.Directory)
 	sportsHandler := handlers.NewSportsHandler(sportsService, liveHandler, epgService)
+	sportsLinksHandler := handlers.NewSportsLinksHandler(store.SportsLinks(), liveHandler)
 	go func() {
 		refresh := func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			if err := sportsService.Refresh(ctx); err != nil {
 				log.Printf("[sports] refresh error: %v", err)
+				return
 			}
+			sportsLinksHandler.SyncTeamsFromGames(ctx, sportsService.GetScoreboard(""))
 		}
 		refresh()
 		ticker := time.NewTicker(90 * time.Second)
@@ -1011,6 +1015,7 @@ func main() {
 		localMediaHandler,
 		epgHandler,
 		sportsHandler,
+		sportsLinksHandler,
 		userSettingsHandler,
 		subtitlesHandler,
 		clientsHandler,

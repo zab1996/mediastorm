@@ -69,3 +69,53 @@ type SportsStatus struct {
 	GameCount   int        `json:"gameCount"`
 	Refreshing  bool       `json:"refreshing"`
 }
+
+// SportsTeamRecord is a persisted team identity (Postgres sports_teams table), keyed on
+// league+ESPN team ID rather than name so it survives the team being renamed/rebranded
+// upstream. Populated lazily as the scoreboard poller observes teams playing games.
+type SportsTeamRecord struct {
+	ID           string    `json:"id"` // "{league}:{espnTeamId}"
+	League       string    `json:"league"`
+	EspnTeamID   string    `json:"espnTeamId"`
+	Name         string    `json:"name"`
+	Abbreviation string    `json:"abbreviation,omitempty"`
+	LogoURL      string    `json:"logoUrl,omitempty"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// SportsChannelLinkSlot is which position a linked channel occupies for a team.
+type SportsChannelLinkSlot string
+
+const (
+	SportsLinkSlotPrimary SportsChannelLinkSlot = "primary"
+	SportsLinkSlotBackup  SportsChannelLinkSlot = "backup"
+)
+
+// SportsTeamChannelLink is one Live TV channel permanently linked to a team (Postgres
+// sports_team_channel_links table) - the "Manage Team Channels" feature. Channel identity
+// is stored denormalized (not just a foreign key) because M3U/Xtream channel IDs regenerate
+// on every playlist parse; Resolved reports whether channel_tvg_id/channel_name still
+// matches something in the caller's current live channel list at read time.
+type SportsTeamChannelLink struct {
+	ID             string                `json:"id"`
+	TeamID         string                `json:"teamId"`
+	Slot           SportsChannelLinkSlot `json:"slot"`
+	Position       int                   `json:"position"`
+	ChannelTvgID   string                `json:"channelTvgId,omitempty"`
+	ChannelName    string                `json:"channelName"`
+	ChannelURL     string                `json:"channelUrl"`
+	ChannelLogo    string                `json:"channelLogo,omitempty"`
+	SourceID       string                `json:"sourceId,omitempty"`
+	SourceName     string                `json:"sourceName,omitempty"`
+	LastVerifiedAt *time.Time            `json:"lastVerifiedAt,omitempty"`
+	CreatedAt      time.Time             `json:"createdAt"`
+	UpdatedAt      time.Time             `json:"updatedAt"`
+	Resolved       bool                  `json:"resolved"`
+}
+
+// SportsTeamWithLinks is a team plus its current channel links, for the "Manage Team
+// Channels" list view.
+type SportsTeamWithLinks struct {
+	SportsTeamRecord
+	Links []SportsTeamChannelLink `json:"links"`
+}

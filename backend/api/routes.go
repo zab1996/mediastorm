@@ -113,6 +113,7 @@ func Register(
 	localMediaHandler *handlers.LocalMediaHandler,
 	epgHandler *handlers.EPGHandler,
 	sportsHandler *handlers.SportsHandler,
+	sportsLinksHandler *handlers.SportsLinksHandler,
 	userSettingsHandler *handlers.UserSettingsHandler,
 	subtitlesHandler *handlers.SubtitlesHandler,
 	clientsHandler *handlers.ClientsHandler,
@@ -482,6 +483,26 @@ func Register(
 		protected.HandleFunc("/sports/game/{id}", sportsHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/sports/game/{id}/streams", sportsHandler.GetGameStreams).Methods(http.MethodGet)
 		protected.HandleFunc("/sports/game/{id}/streams", sportsHandler.Options).Methods(http.MethodOptions)
+	}
+
+	// Sports Team Channels endpoints ("Manage Team Channels": persisted primary/backup
+	// channel links per team). Static "linked-channels" route registered before the
+	// {teamId} wildcard routes so gorilla/mux doesn't treat it as a team ID.
+	if sportsLinksHandler != nil {
+		protected.HandleFunc("/sports/teams", sportsLinksHandler.GetTeams).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/teams", sportsLinksHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/teams/linked-channels", sportsLinksHandler.GetLinkedChannels).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/teams/linked-channels", sportsLinksHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/teams/{teamId}/links", sportsLinksHandler.GetTeamLinks).Methods(http.MethodGet)
+		protected.HandleFunc("/sports/teams/{teamId}/links", sportsLinksHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/teams/{teamId}/links/primary", sportsLinksHandler.SetPrimaryLink).Methods(http.MethodPut)
+		protected.HandleFunc("/sports/teams/{teamId}/links/primary", sportsLinksHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/teams/{teamId}/links/backup", sportsLinksHandler.AddBackupLink).Methods(http.MethodPost)
+		protected.HandleFunc("/sports/teams/{teamId}/links/backup", sportsLinksHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/teams/{teamId}/links/reorder", sportsLinksHandler.ReorderBackups).Methods(http.MethodPut)
+		protected.HandleFunc("/sports/teams/{teamId}/links/reorder", sportsLinksHandler.Options).Methods(http.MethodOptions)
+		protected.HandleFunc("/sports/teams/{teamId}/links/{linkId}", sportsLinksHandler.DeleteLink).Methods(http.MethodDelete)
+		protected.HandleFunc("/sports/teams/{teamId}/links/{linkId}", sportsLinksHandler.Options).Methods(http.MethodOptions)
 	}
 
 	// VOD stream usage endpoint

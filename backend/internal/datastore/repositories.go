@@ -358,3 +358,28 @@ type RecordingRepository interface {
 	Count(ctx context.Context) (int64, error)
 	MarkStaleActiveAsFailed(ctx context.Context, now time.Time) (int64, error)
 }
+
+// SportsLinksRepository manages the "Manage Team Channels" feature's persisted state:
+// team identities and the Live TV channels linked to them (primary + backups). Global/
+// shared, not per-user - see the sports feature plan for why.
+type SportsLinksRepository interface {
+	// UpsertTeam records/refreshes a team's identity, called lazily whenever the ESPN
+	// scoreboard poller observes it playing a game.
+	UpsertTeam(ctx context.Context, team models.SportsTeamRecord) error
+	ListTeamsByLeague(ctx context.Context, league string) ([]models.SportsTeamRecord, error)
+	GetTeam(ctx context.Context, teamID string) (*models.SportsTeamRecord, error)
+
+	GetLinksForTeam(ctx context.Context, teamID string) ([]models.SportsTeamChannelLink, error)
+	// GetLinksForTeams batches the above for the GameCard "linked channels" lookup, which
+	// needs several teams' links per scoreboard page rather than one at a time.
+	GetLinksForTeams(ctx context.Context, teamIDs []string) (map[string][]models.SportsTeamChannelLink, error)
+
+	// SetPrimaryLink upserts the one primary-slot link for a team (position is always 0).
+	SetPrimaryLink(ctx context.Context, teamID string, link models.SportsTeamChannelLink) (*models.SportsTeamChannelLink, error)
+	// AddBackupLink appends a new backup-slot link after the team's current highest backup
+	// position.
+	AddBackupLink(ctx context.Context, teamID string, link models.SportsTeamChannelLink) (*models.SportsTeamChannelLink, error)
+	DeleteLink(ctx context.Context, teamID, linkID string) error
+	// ReorderBackups rewrites backup positions to match the given link ID order.
+	ReorderBackups(ctx context.Context, teamID string, orderedLinkIDs []string) error
+}
