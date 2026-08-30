@@ -16,6 +16,14 @@ import (
 
 const sportsRefreshTimeout = 20 * time.Second
 
+// EPG-title matching falls back to a per-channel scan of the whole EPG dataset for any
+// channel ID it can't look up directly (services/epg findProgramsByChannelMatch), so
+// feeding it every unmatched channel on a large playlist (tens of thousands of channels is
+// common with Xtream sources) makes GetGameStreams hang for minutes. Cap it instead - the
+// broadcast-name pass above already covers the common case, so skipping the EPG fallback
+// on oversized playlists is a reasonable trade for staying responsive.
+const maxEPGMatchChannels = 1500
+
 // SportsHandler serves ESPN-backed scoreboard/schedule data and matches games to
 // the caller's configured Live TV channels for "what can I watch this on" lookups.
 type SportsHandler struct {
@@ -174,7 +182,7 @@ func matchGameToChannels(game models.SportsGame, channels []LiveChannel, epgServ
 				key := strings.ToLower(ch.TvgID)
 				byTvgID[key] = append(byTvgID[key], ch)
 			}
-			if len(channelIDs) > 0 {
+			if len(channelIDs) > 0 && len(channelIDs) <= maxEPGMatchChannels {
 				for _, nowPlaying := range epgService.GetNowPlaying(channelIDs) {
 					title := ""
 					if nowPlaying.Current != nil {
