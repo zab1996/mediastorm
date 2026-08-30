@@ -73,6 +73,8 @@ type espnCompetitor struct {
 type espnTeam struct {
 	ID           string `json:"id"`
 	DisplayName  string `json:"displayName"`
+	Location     string `json:"location"`
+	Name         string `json:"name"`
 	Abbreviation string `json:"abbreviation"`
 	Logo         string `json:"logo"`
 }
@@ -137,6 +139,8 @@ func espnEventToGame(event espnEvent, league League) (models.SportsGame, bool) {
 		HomeTeam: models.SportsTeam{
 			ID:           home.Team.ID,
 			Name:         home.Team.DisplayName,
+			Location:     home.Team.Location,
+			Nickname:     home.Team.Name,
 			Abbreviation: home.Team.Abbreviation,
 			LogoURL:      home.Team.Logo,
 			Score:        home.Score,
@@ -145,6 +149,8 @@ func espnEventToGame(event espnEvent, league League) (models.SportsGame, bool) {
 		AwayTeam: models.SportsTeam{
 			ID:           away.Team.ID,
 			Name:         away.Team.DisplayName,
+			Location:     away.Team.Location,
+			Nickname:     away.Team.Name,
 			Abbreviation: away.Team.Abbreviation,
 			LogoURL:      away.Team.Logo,
 			Score:        away.Score,

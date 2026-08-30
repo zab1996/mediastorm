@@ -855,6 +855,37 @@ func (s *Service) GetNowPlaying(channelIDs []string, timeOffset ...time.Duration
 	}
 	result := make([]models.EPGNowPlaying, 0, len(channelIDs))
 
+	// Build normalized lookup indexes once for the entire batch. The previous fallback
+	// linearly scanned the full EPG for every unmatched playlist channel, turning large
+	// sports lookups into O(playlist × EPG). Ambiguous normalized keys are deliberately
+	// omitted rather than silently binding a channel to the wrong guide entry.
+	byNormalizedID := make(map[string][]models.EPGProgram, len(s.schedule.Programs))
+	ambiguousIDs := make(map[string]struct{})
+	for epgChannelID, programs := range s.schedule.Programs {
+		key := normalizeChannelID(epgChannelID)
+		if _, exists := byNormalizedID[key]; exists {
+			delete(byNormalizedID, key)
+			ambiguousIDs[key] = struct{}{}
+		} else if _, ambiguous := ambiguousIDs[key]; !ambiguous {
+			byNormalizedID[key] = programs
+		}
+	}
+	byNormalizedName := make(map[string][]models.EPGProgram, len(s.schedule.Channels))
+	ambiguousNames := make(map[string]struct{})
+	for epgChannelID, channel := range s.schedule.Channels {
+		programs := s.schedule.Programs[epgChannelID]
+		if len(programs) == 0 {
+			continue
+		}
+		key := normalizeChannelID(channel.Name)
+		if _, exists := byNormalizedName[key]; exists {
+			delete(byNormalizedName, key)
+			ambiguousNames[key] = struct{}{}
+		} else if _, ambiguous := ambiguousNames[key]; !ambiguous {
+			byNormalizedName[key] = programs
+		}
+	}
+
 	for _, channelID := range channelIDs {
 		np := models.EPGNowPlaying{ChannelID: channelID}
 
@@ -864,9 +895,13 @@ func (s *Service) GetNowPlaying(channelIDs []string, timeOffset ...time.Duration
 		// Try to find programs with normalized channel ID
 		programs := s.schedule.Programs[lookupID]
 
-		// If no match, try to find by other matching strategies
+		// If no direct match, use the per-batch normalized ID/name indexes.
 		if len(programs) == 0 {
-			programs = s.findProgramsByChannelMatch(channelID)
+			key := normalizeChannelID(channelID)
+			programs = byNormalizedID[key]
+			if len(programs) == 0 {
+				programs = byNormalizedName[key]
+			}
 		}
 
 		for i, prog := range programs {

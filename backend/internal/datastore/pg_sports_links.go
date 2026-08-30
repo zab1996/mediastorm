@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -17,11 +18,11 @@ type pgSportsLinksRepo struct {
 
 func (r *pgSportsLinksRepo) UpsertTeam(ctx context.Context, team models.SportsTeamRecord) error {
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO sports_teams (id, league, espn_team_id, name, abbreviation, logo_url, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, now())
+		INSERT INTO sports_teams (id, league, espn_team_id, name, location, nickname, abbreviation, logo_url, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
 		ON CONFLICT (id) DO UPDATE SET
-			name = $4, abbreviation = $5, logo_url = $6, updated_at = now()`,
-		team.ID, team.League, team.EspnTeamID, team.Name, team.Abbreviation, team.LogoURL)
+			name = $4, location = $5, nickname = $6, abbreviation = $7, logo_url = $8, updated_at = now()`,
+		team.ID, team.League, team.EspnTeamID, team.Name, team.Location, team.Nickname, team.Abbreviation, team.LogoURL)
 	if err != nil {
 		return fmt.Errorf("upsert sports team: %w", err)
 	}
@@ -30,7 +31,7 @@ func (r *pgSportsLinksRepo) UpsertTeam(ctx context.Context, team models.SportsTe
 
 func (r *pgSportsLinksRepo) ListTeamsByLeague(ctx context.Context, league string) ([]models.SportsTeamRecord, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, league, espn_team_id, name, abbreviation, logo_url, updated_at
+		SELECT id, league, espn_team_id, name, location, nickname, abbreviation, logo_url, updated_at
 		FROM sports_teams WHERE league = $1 ORDER BY name`, league)
 	if err != nil {
 		return nil, fmt.Errorf("list sports teams: %w", err)
@@ -40,7 +41,7 @@ func (r *pgSportsLinksRepo) ListTeamsByLeague(ctx context.Context, league string
 	var teams []models.SportsTeamRecord
 	for rows.Next() {
 		var t models.SportsTeamRecord
-		if err := rows.Scan(&t.ID, &t.League, &t.EspnTeamID, &t.Name, &t.Abbreviation, &t.LogoURL, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.League, &t.EspnTeamID, &t.Name, &t.Location, &t.Nickname, &t.Abbreviation, &t.LogoURL, &t.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan sports team: %w", err)
 		}
 		teams = append(teams, t)
@@ -51,9 +52,9 @@ func (r *pgSportsLinksRepo) ListTeamsByLeague(ctx context.Context, league string
 func (r *pgSportsLinksRepo) GetTeam(ctx context.Context, teamID string) (*models.SportsTeamRecord, error) {
 	var t models.SportsTeamRecord
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, league, espn_team_id, name, abbreviation, logo_url, updated_at
+		SELECT id, league, espn_team_id, name, location, nickname, abbreviation, logo_url, updated_at
 		FROM sports_teams WHERE id = $1`, teamID).
-		Scan(&t.ID, &t.League, &t.EspnTeamID, &t.Name, &t.Abbreviation, &t.LogoURL, &t.UpdatedAt)
+		Scan(&t.ID, &t.League, &t.EspnTeamID, &t.Name, &t.Location, &t.Nickname, &t.Abbreviation, &t.LogoURL, &t.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -63,12 +64,13 @@ func (r *pgSportsLinksRepo) GetTeam(ctx context.Context, teamID string) (*models
 	return &t, nil
 }
 
-const sportsLinkColumns = `id, team_id, slot, position, channel_tvg_id, channel_name, channel_url, channel_logo, source_id, source_name, last_verified_at, created_at, updated_at`
+const sportsLinkColumns = `id, team_id, slot, position, channel_tvg_id, channel_name, channel_url, channel_logo, source_id, source_name, auto_linked, link_confidence, match_reason, last_verified_at, created_at, updated_at`
 
 func scanSportsLink(row pgx.Row) (models.SportsTeamChannelLink, error) {
 	var l models.SportsTeamChannelLink
 	err := row.Scan(&l.ID, &l.TeamID, &l.Slot, &l.Position, &l.ChannelTvgID, &l.ChannelName, &l.ChannelURL,
-		&l.ChannelLogo, &l.SourceID, &l.SourceName, &l.LastVerifiedAt, &l.CreatedAt, &l.UpdatedAt)
+		&l.ChannelLogo, &l.SourceID, &l.SourceName, &l.AutoLinked, &l.LinkConfidence, &l.MatchReason,
+		&l.LastVerifiedAt, &l.CreatedAt, &l.UpdatedAt)
 	return l, err
 }
 
@@ -125,11 +127,12 @@ func (r *pgSportsLinksRepo) SetPrimaryLink(ctx context.Context, teamID string, l
 	}
 	row := r.pool.QueryRow(ctx, `
 		INSERT INTO sports_team_channel_links
-			(id, team_id, slot, position, channel_tvg_id, channel_name, channel_url, channel_logo, source_id, source_name, created_at, updated_at)
-		VALUES ($1, $2, 'primary', 0, $3, $4, $5, $6, $7, $8, now(), now())
+			(id, team_id, slot, position, channel_tvg_id, channel_name, channel_url, channel_logo, source_id, source_name, auto_linked, link_confidence, match_reason, created_at, updated_at)
+		VALUES ($1, $2, 'primary', 0, $3, $4, $5, $6, $7, $8, false, 0, '', now(), now())
 		ON CONFLICT (team_id, slot, position) DO UPDATE SET
 			channel_tvg_id = $3, channel_name = $4, channel_url = $5, channel_logo = $6,
-			source_id = $7, source_name = $8, updated_at = now()
+			source_id = $7, source_name = $8, auto_linked = false, link_confidence = 0,
+			match_reason = '', updated_at = now()
 		RETURNING `+sportsLinkColumns,
 		link.ID, teamID, link.ChannelTvgID, link.ChannelName, link.ChannelURL, link.ChannelLogo, link.SourceID, link.SourceName)
 	saved, err := scanSportsLink(row)
@@ -137,6 +140,47 @@ func (r *pgSportsLinksRepo) SetPrimaryLink(ctx context.Context, teamID string, l
 		return nil, fmt.Errorf("set primary channel link: %w", err)
 	}
 	return &saved, nil
+}
+
+func (r *pgSportsLinksRepo) InsertAutoPrimaryLinks(ctx context.Context, links []models.SportsTeamChannelLink) ([]models.SportsTeamChannelLink, error) {
+	if len(links) == 0 {
+		return []models.SportsTeamChannelLink{}, nil
+	}
+	values := make([]string, 0, len(links))
+	args := make([]any, 0, len(links)*10)
+	for i := range links {
+		link := &links[i]
+		if link.ID == "" {
+			link.ID = uuid.NewString()
+		}
+		base := i*10 + 1
+		values = append(values, fmt.Sprintf("($%d,$%d,'primary',0,$%d,$%d,$%d,$%d,$%d,$%d,true,$%d,$%d,now(),now())",
+			base, base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9))
+		args = append(args, link.ID, link.TeamID, link.ChannelTvgID, link.ChannelName, link.ChannelURL,
+			link.ChannelLogo, link.SourceID, link.SourceName, link.LinkConfidence, link.MatchReason)
+	}
+	query := `INSERT INTO sports_team_channel_links
+		(id, team_id, slot, position, channel_tvg_id, channel_name, channel_url, channel_logo, source_id, source_name, auto_linked, link_confidence, match_reason, created_at, updated_at)
+		VALUES ` + strings.Join(values, ",") + `
+		ON CONFLICT (team_id, slot, position) DO NOTHING
+		RETURNING ` + sportsLinkColumns
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("insert auto primary links: %w", err)
+	}
+	defer rows.Close()
+	saved := make([]models.SportsTeamChannelLink, 0, len(links))
+	for rows.Next() {
+		link, scanErr := scanSportsLink(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan auto primary link: %w", scanErr)
+		}
+		saved = append(saved, link)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read auto primary links: %w", err)
+	}
+	return saved, nil
 }
 
 func (r *pgSportsLinksRepo) AddBackupLink(ctx context.Context, teamID string, link models.SportsTeamChannelLink) (*models.SportsTeamChannelLink, error) {

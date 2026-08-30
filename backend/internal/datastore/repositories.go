@@ -376,6 +376,9 @@ type SportsLinksRepository interface {
 
 	// SetPrimaryLink upserts the one primary-slot link for a team (position is always 0).
 	SetPrimaryLink(ctx context.Context, teamID string, link models.SportsTeamChannelLink) (*models.SportsTeamChannelLink, error)
+	// InsertAutoPrimaryLinks inserts eligible primary links in one atomic statement and
+	// skips teams that acquired a primary after preview rather than overwriting them.
+	InsertAutoPrimaryLinks(ctx context.Context, links []models.SportsTeamChannelLink) ([]models.SportsTeamChannelLink, error)
 	// AddBackupLink appends a new backup-slot link after the team's current highest backup
 	// position.
 	AddBackupLink(ctx context.Context, teamID string, link models.SportsTeamChannelLink) (*models.SportsTeamChannelLink, error)

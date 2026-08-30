@@ -6,6 +6,8 @@ import "time"
 type SportsTeam struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
+	Location     string `json:"location,omitempty"`
+	Nickname     string `json:"nickname,omitempty"`
 	Abbreviation string `json:"abbreviation,omitempty"`
 	LogoURL      string `json:"logoUrl,omitempty"`
 	Score        string `json:"score,omitempty"`
@@ -48,17 +50,36 @@ type SportsLeague struct {
 // found by heuristically matching the game's teams/broadcasts against the user's
 // configured Live TV channels and EPG now-playing data. Best-effort, not authoritative.
 type SportsStreamMatch struct {
-	ChannelID    string `json:"channelId"`
-	ChannelName  string `json:"channelName"`
-	ChannelURL   string `json:"channelUrl"`
-	ChannelLogo  string `json:"channelLogo,omitempty"`
-	ChannelTvgID string `json:"channelTvgId,omitempty"`
-	SourceID     string `json:"sourceId,omitempty"`
-	SourceName   string `json:"sourceName,omitempty"`
-	ProgramTitle string `json:"programTitle,omitempty"`
-	MatchedOn    string `json:"matchedOn"`             // "broadcast" | "team-name" | "epg-title"
-	Broadcast    string `json:"broadcast,omitempty"`   // set when MatchedOn == "broadcast": which broadcast name matched
-	MatchedTeam  string `json:"matchedTeam,omitempty"` // set when MatchedOn == "team-name" or "epg-title": which team's name matched
+	ChannelID      string   `json:"channelId"`
+	ChannelName    string   `json:"channelName"`
+	ChannelURL     string   `json:"channelUrl"`
+	ChannelLogo    string   `json:"channelLogo,omitempty"`
+	ChannelTvgID   string   `json:"channelTvgId,omitempty"`
+	SourceID       string   `json:"sourceId,omitempty"`
+	SourceName     string   `json:"sourceName,omitempty"`
+	ProgramTitle   string   `json:"programTitle,omitempty"`
+	MatchedOn      string   `json:"matchedOn"`             // "broadcast" | "team-name" | "matchup-name" | "epg-title"
+	Broadcast      string   `json:"broadcast,omitempty"`   // set when MatchedOn == "broadcast": which broadcast name matched
+	MatchedTeam    string   `json:"matchedTeam,omitempty"` // set when MatchedOn == "team-name" or "epg-title": which team's name matched
+	Confidence     float64  `json:"confidence"`
+	ConfidenceTier string   `json:"confidenceTier"` // "strong" | "possible"
+	MatchReason    string   `json:"matchReason"`
+	MatchedTerms   []string `json:"matchedTerms,omitempty"`
+	LifecycleState string   `json:"lifecycleState,omitempty"`
+}
+
+// SportsStreamGroup collapses equivalent playlist entries while preserving every distinct
+// source/URL as an explicit alternative. The legacy flat streams response remains available
+// for clients that do not understand groups yet.
+type SportsStreamGroup struct {
+	GroupKey       string              `json:"groupKey"`
+	DisplayName    string              `json:"displayName"`
+	Confidence     float64             `json:"confidence"`
+	ConfidenceTier string              `json:"confidenceTier"`
+	MatchReason    string              `json:"matchReason"`
+	FeedCount      int                 `json:"feedCount"`
+	Primary        SportsStreamMatch   `json:"primary"`
+	Alternatives   []SportsStreamMatch `json:"alternatives"`
 }
 
 // SportsStatus reports the health of the sports scoreboard service.
@@ -78,9 +99,45 @@ type SportsTeamRecord struct {
 	League       string    `json:"league"`
 	EspnTeamID   string    `json:"espnTeamId"`
 	Name         string    `json:"name"`
+	Location     string    `json:"location,omitempty"`
+	Nickname     string    `json:"nickname,omitempty"`
 	Abbreviation string    `json:"abbreviation,omitempty"`
 	LogoURL      string    `json:"logoUrl,omitempty"`
 	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// SportsChannelCandidate is a ranked Live TV channel suggestion for a team.
+// Explicit text searches may include candidates below the normal confidence floor so
+// administrators can always make a manual selection.
+type SportsChannelCandidate struct {
+	ChannelID      string   `json:"channelId"`
+	ChannelName    string   `json:"channelName"`
+	ChannelURL     string   `json:"channelUrl"`
+	ChannelLogo    string   `json:"channelLogo,omitempty"`
+	ChannelTvgID   string   `json:"channelTvgId,omitempty"`
+	SourceID       string   `json:"sourceId,omitempty"`
+	SourceName     string   `json:"sourceName,omitempty"`
+	Group          string   `json:"group,omitempty"`
+	Confidence     float64  `json:"confidence"`
+	ConfidenceTier string   `json:"confidenceTier"`
+	MatchReason    string   `json:"matchReason"`
+	MatchedTerms   []string `json:"matchedTerms,omitempty"`
+}
+
+type SportsAutoLinkTeamResult struct {
+	Team               SportsTeamRecord        `json:"team"`
+	Candidate          *SportsChannelCandidate `json:"candidate,omitempty"`
+	RunnerUpConfidence float64                 `json:"runnerUpConfidence,omitempty"`
+	ConfidenceGap      float64                 `json:"confidenceGap,omitempty"`
+	Eligible           bool                    `json:"eligible"`
+	SkipReason         string                  `json:"skipReason,omitempty"`
+}
+
+type SportsAutoLinkPreview struct {
+	League        string                     `json:"league"`
+	EligibleCount int                        `json:"eligibleCount"`
+	SkippedCount  int                        `json:"skippedCount"`
+	Results       []SportsAutoLinkTeamResult `json:"results"`
 }
 
 // SportsChannelLinkSlot is which position a linked channel occupies for a team.
@@ -107,6 +164,9 @@ type SportsTeamChannelLink struct {
 	ChannelLogo    string                `json:"channelLogo,omitempty"`
 	SourceID       string                `json:"sourceId,omitempty"`
 	SourceName     string                `json:"sourceName,omitempty"`
+	AutoLinked     bool                  `json:"autoLinked"`
+	LinkConfidence float64               `json:"linkConfidence,omitempty"`
+	MatchReason    string                `json:"matchReason,omitempty"`
 	LastVerifiedAt *time.Time            `json:"lastVerifiedAt,omitempty"`
 	CreatedAt      time.Time             `json:"createdAt"`
 	UpdatedAt      time.Time             `json:"updatedAt"`
