@@ -57,7 +57,43 @@ type Settings struct {
 // Server-wide (not per-user) since the poller fetches once for the whole server on a
 // shared interval - see services/sports.LeagueCatalog for the supported league IDs.
 type SportsSettings struct {
-	EnabledLeagues []string `json:"enabledLeagues,omitempty"`
+	EnabledLeagues        []string                     `json:"enabledLeagues,omitempty"`
+	FavoriteTeamIDs       []string                     `json:"favoriteTeamIds,omitempty"`
+	DefaultSourceIDs      []string                     `json:"defaultSourceIds,omitempty"`
+	DefaultCategoryIDs    []string                     `json:"defaultCategoryIds,omitempty"`
+	LeagueSearchOverrides map[string]SportsSearchScope `json:"leagueSearchOverrides,omitempty"`
+}
+
+// SportsSearchScope limits automatic sports stream discovery for one league. Empty lists
+// mean every enabled Live TV source/category, matching the global defaults.
+type SportsSearchScope struct {
+	SourceIDs   []string `json:"sourceIds,omitempty"`
+	CategoryIDs []string `json:"categoryIds,omitempty"`
+}
+
+// defaultEnabledLeagueIDs is duplicated (not imported) from services/sports.defaultLeagueIDs
+// to avoid a config -> services/sports import cycle; keep the two lists in sync.
+var defaultEnabledLeagueIDs = []string{"nfl", "nba", "mlb", "nhl", "ufc"}
+
+// Normalize backfills nil fields so every caller of Settings.Sports (not just the sports
+// HTTP handlers, which previously did this ad hoc inline) sees a consistent, non-nil shape -
+// matching the pattern every other settings struct in this file follows.
+func (s *SportsSettings) Normalize() {
+	if len(s.EnabledLeagues) == 0 {
+		s.EnabledLeagues = append([]string(nil), defaultEnabledLeagueIDs...)
+	}
+	if s.FavoriteTeamIDs == nil {
+		s.FavoriteTeamIDs = []string{}
+	}
+	if s.DefaultSourceIDs == nil {
+		s.DefaultSourceIDs = []string{}
+	}
+	if s.DefaultCategoryIDs == nil {
+		s.DefaultCategoryIDs = []string{}
+	}
+	if s.LeagueSearchOverrides == nil {
+		s.LeagueSearchOverrides = map[string]SportsSearchScope{}
+	}
 }
 
 type ServerSettings struct {
@@ -1909,7 +1945,7 @@ func DefaultSettings() Settings {
 		Transmux:  TransmuxSettings{Enabled: true, FFmpegPath: "ffmpeg", FFprobePath: "ffprobe", HLSTempDirectory: "/tmp/novastream-hls", HardwareAcceleration: "auto"},
 		Playback:  PlaybackSettings{PreferredPlayer: "native", PreferredAudioLanguage: "eng", PauseWhenAppInactive: false, UseLoadingScreen: false, SubtitleSize: 1.0, SubtitleUseCropDetectPosition: false, SubtitleColor: "#FFFFFF", SubtitleOpacity: 1.0, SubtitleBold: false, SubtitleOutlineEnabled: false, SubtitleOutlineColor: "#000000", SubtitleOutlineWeight: 0.35, SubtitleBackgroundEnabled: true, SubtitleBackgroundColor: "#000000", SubtitleBackgroundOpacity: 0.6, SeekForwardSeconds: 30, SeekBackwardSeconds: 10, PrerollMode: "disabled", PrerollMediaScope: "all", StreamMigrationEnabled: true, CreditsDetectionEnabled: false, MatchFrameRate: false, LiveClosedCaptionExtraction: true, Thumbnails: PlaybackThumbnailSettings{Enabled: false, Workers: 1}},
 		Live:      LiveSettings{Mode: "m3u", PlaylistURL: "", MaxStreams: 0, PlaylistCacheTTLHours: 24},
-		Sports:    SportsSettings{EnabledLeagues: []string{"mlb", "nfl", "nba", "nhl"}},
+		Sports:    SportsSettings{EnabledLeagues: []string{"nfl", "nba", "mlb", "nhl", "ufc"}},
 		HomeShelves: HomeShelvesSettings{
 			Shelves:                      DefaultHomeShelfConfigs(),
 			ItemCap:                      20,
@@ -2438,6 +2474,7 @@ func (m *Manager) Load() (Settings, error) {
 	s.Metadata.NormalizeLanguages()
 	s.Playback.NormalizeAllowedTrackLanguages()
 	s.Playback.NormalizePreroll()
+	s.Sports.Normalize()
 
 	if !s.Transmux.Enabled && strings.TrimSpace(s.Transmux.FFmpegPath) == "" && strings.TrimSpace(s.Transmux.FFprobePath) == "" {
 		s.Transmux = TransmuxSettings{Enabled: true, FFmpegPath: "ffmpeg", FFprobePath: "ffprobe", HLSTempDirectory: "/tmp/novastream-hls"}
@@ -2945,6 +2982,7 @@ func (m *Manager) Save(s Settings) error {
 	s.Metadata.NormalizeLanguages()
 	s.Playback.NormalizeAllowedTrackLanguages()
 	s.Playback.NormalizePreroll()
+	s.Sports.Normalize()
 	if err := s.Server.NormalizeAllowedPrivateMediaOrigins(); err != nil {
 		return err
 	}

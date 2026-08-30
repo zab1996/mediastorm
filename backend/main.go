@@ -914,7 +914,9 @@ func main() {
 	// matching, plus the "Manage Team Channels" links CRUD).
 	sportsService := sports.NewService(settings.Cache.Directory)
 	sportsHandler := handlers.NewSportsHandler(sportsService, liveHandler, epgService)
+	sportsHandler.SetConfigManager(cfgManager)
 	sportsLinksHandler := handlers.NewSportsLinksHandler(store.SportsLinks(), liveHandler)
+	sportsLinksHandler.SetConfigManager(cfgManager)
 	go func() {
 		refresh := func() {
 			// Re-read enabled leagues from live config each tick (not just at startup) so an
@@ -923,13 +925,25 @@ func main() {
 			if liveSettings, err := cfgManager.Load(); err == nil {
 				sportsService.SetEnabledLeagueIDs(liveSettings.Sports.EnabledLeagues)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			if err := sportsService.Refresh(ctx); err != nil {
+			refreshCtx, cancelRefresh := context.WithTimeout(context.Background(), 15*time.Second)
+			if err := sportsService.Refresh(refreshCtx); err != nil {
 				log.Printf("[sports] refresh error: %v", err)
-				return
 			}
-			sportsLinksHandler.SyncTeamsFromGames(ctx, sportsService.GetScoreboard(""))
+			cancelRefresh()
+
+			syncGamesCtx, cancelSyncGames := context.WithTimeout(context.Background(), 10*time.Second)
+			sportsLinksHandler.SyncTeamsFromGames(syncGamesCtx, sportsService.GetScoreboard(""))
+			cancelSyncGames()
+
+			catalogCtx, cancelCatalog := context.WithTimeout(context.Background(), 30*time.Second)
+			catalog, err := sportsService.EnsureTeamCatalog(catalogCtx)
+			cancelCatalog()
+			if err != nil {
+				log.Printf("[sports] team catalog refresh error: %v", err)
+			}
+			syncCatalogCtx, cancelSyncCatalog := context.WithTimeout(context.Background(), 10*time.Second)
+			sportsLinksHandler.SyncTeams(syncCatalogCtx, catalog)
+			cancelSyncCatalog()
 		}
 		refresh()
 		ticker := time.NewTicker(90 * time.Second)

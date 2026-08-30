@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"novastream/config"
 	"novastream/models"
 	"novastream/services/sports"
 )
@@ -34,7 +36,14 @@ type SportsHandler struct {
 	service     *sports.Service
 	liveHandler *LiveHandler
 	epgService  LiveEPGNowPlayingProvider
+	config      *config.Manager
 }
+
+type sportsScheduleProvider interface {
+	GetScheduleMultiple(channelIDs []string, start, end time.Time) map[string][]models.EPGProgram
+}
+
+func (h *SportsHandler) SetConfigManager(manager *config.Manager) { h.config = manager }
 
 // NewSportsHandler creates a new sports handler.
 func NewSportsHandler(service *sports.Service, liveHandler *LiveHandler, epgService LiveEPGNowPlayingProvider) *SportsHandler {
@@ -54,6 +63,188 @@ func (h *SportsHandler) GetScoreboard(w http.ResponseWriter, r *http.Request) {
 // GetLeagues returns the tracked leagues.
 func (h *SportsHandler) GetLeagues(w http.ResponseWriter, r *http.Request) {
 	writeSportsJSON(w, map[string]any{"leagues": h.service.Leagues()})
+}
+
+// GetHub exposes generalized events grouped by lifecycle for large-screen clients.
+func (h *SportsHandler) GetHub(w http.ResponseWriter, r *http.Request) {
+	games := h.service.GetScoreboard(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("league"))))
+	events := make([]models.SportsEvent, 0, len(games))
+	for _, game := range games {
+		participants := game.Participants
+		if len(participants) == 0 {
+			participants = []models.SportsParticipant{
+				{ID: game.AwayTeam.ID, Name: game.AwayTeam.Name, Abbreviation: game.AwayTeam.Abbreviation, LogoURL: game.AwayTeam.LogoURL, Score: game.AwayTeam.Score, Winner: game.AwayTeam.Winner},
+				{ID: game.HomeTeam.ID, Name: game.HomeTeam.Name, Abbreviation: game.HomeTeam.Abbreviation, LogoURL: game.HomeTeam.LogoURL, Score: game.HomeTeam.Score, Winner: game.HomeTeam.Winner},
+			}
+		}
+		title := game.Title
+		if title == "" {
+			title = strings.TrimSpace(game.AwayTeam.Name + " vs " + game.HomeTeam.Name)
+		}
+		kind := game.EventKind
+		if kind == "" {
+			kind = "matchup"
+		}
+		events = append(events, models.SportsEvent{ID: game.ID, Title: title, League: game.League, Sport: game.Sport, EventKind: kind, StartTime: game.StartTime, Status: game.Status, StatusDetail: game.StatusDetail, Participants: participants, Broadcasts: game.Broadcasts, VenueName: game.VenueName})
+	}
+	writeSportsJSON(w, map[string]any{"events": events, "specialTournaments": []any{}})
+}
+
+// SearchLiveHub searches channel metadata, seven days of EPG, and cached sports events.
+func (h *SportsHandler) SearchLiveHub(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(query) < 2 {
+		http.Error(w, `{"error":"query must contain at least two characters"}`, http.StatusBadRequest)
+		return
+	}
+	needle := strings.ToLower(query)
+	channels, err := h.liveHandler.FetchFilteredChannelsForRequest(r)
+	if err != nil {
+		http.Error(w, `{"error":"failed to search live channels"}`, http.StatusBadGateway)
+		return
+	}
+	channelMatches := make([]LiveChannel, 0)
+	ids := make([]string, 0, len(channels))
+	for _, channel := range channels {
+		if channel.TvgID != "" {
+			ids = append(ids, channel.TvgID)
+		}
+		if strings.Contains(strings.ToLower(channel.Name+" "+channel.Group+" "+channel.TvgName), needle) && len(channelMatches) < 100 {
+			channelMatches = append(channelMatches, channel)
+		}
+	}
+	livePrograms := make([]models.EPGProgram, 0)
+	upcomingPrograms := make([]models.EPGProgram, 0)
+	if schedule, ok := h.epgService.(sportsScheduleProvider); ok {
+		now := time.Now()
+		schedules := schedule.GetScheduleMultiple(ids, now.Add(-time.Hour), now.Add(7*24*time.Hour))
+		for _, programs := range schedules {
+			for _, program := range programs {
+				if !strings.Contains(strings.ToLower(program.Title+" "+program.Description), needle) {
+					continue
+				}
+				if !program.Start.After(now) && program.Stop.After(now) {
+					if len(livePrograms) < 100 {
+						livePrograms = append(livePrograms, program)
+					}
+				} else if len(upcomingPrograms) < 100 {
+					upcomingPrograms = append(upcomingPrograms, program)
+				}
+			}
+		}
+	}
+	sportsEvents := make([]models.SportsGame, 0)
+	teams := make([]models.SportsTeam, 0)
+	seenTeams := make(map[string]struct{})
+	for _, game := range h.service.GetScoreboard("") {
+		matchedEvent := strings.Contains(strings.ToLower(game.Title+" "+game.HomeTeam.Name+" "+game.AwayTeam.Name+" "+game.League), needle)
+		if matchedEvent && len(sportsEvents) < 100 {
+			sportsEvents = append(sportsEvents, game)
+		}
+		for _, team := range []models.SportsTeam{game.HomeTeam, game.AwayTeam} {
+			if !strings.Contains(strings.ToLower(team.Name+" "+team.Location+" "+team.Nickname+" "+team.Abbreviation), needle) {
+				continue
+			}
+			key := game.League + ":" + team.ID
+			if _, exists := seenTeams[key]; exists {
+				continue
+			}
+			seenTeams[key] = struct{}{}
+			if len(teams) < 100 {
+				teams = append(teams, team)
+			}
+		}
+	}
+	writeSportsJSON(w, map[string]any{"channels": channelMatches, "livePrograms": livePrograms, "upcomingPrograms": upcomingPrograms, "teams": teams, "sportsEvents": sportsEvents})
+}
+
+func (h *SportsHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
+	if h.config == nil {
+		http.Error(w, `{"error":"sports settings unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	settings, err := h.config.Load()
+	if err != nil {
+		http.Error(w, `{"error":"failed to load sports settings"}`, http.StatusInternalServerError)
+		return
+	}
+	settings.Sports.Normalize()
+	writeSportsJSON(w, settings.Sports)
+}
+
+func (h *SportsHandler) PutSettings(w http.ResponseWriter, r *http.Request) {
+	if h.config == nil {
+		http.Error(w, `{"error":"sports settings unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	var next config.SportsSettings
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&next); err != nil {
+		http.Error(w, `{"error":"invalid sports settings"}`, http.StatusBadRequest)
+		return
+	}
+	known := make(map[string]struct{})
+	for _, league := range h.service.Leagues() {
+		known[league.ID] = struct{}{}
+	}
+	clean := make([]string, 0, len(next.EnabledLeagues))
+	seen := make(map[string]struct{})
+	for _, raw := range next.EnabledLeagues {
+		id := strings.ToLower(strings.TrimSpace(raw))
+		if _, ok := known[id]; !ok {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		clean = append(clean, id)
+	}
+	if len(clean) == 0 {
+		http.Error(w, `{"error":"enable at least one supported league"}`, http.StatusBadRequest)
+		return
+	}
+	next.EnabledLeagues = clean
+	settings, err := h.config.Load()
+	if err != nil {
+		http.Error(w, `{"error":"failed to load settings"}`, http.StatusInternalServerError)
+		return
+	}
+	settings.Sports = next
+	if err := h.config.Save(settings); err != nil {
+		http.Error(w, `{"error":"failed to save sports settings"}`, http.StatusInternalServerError)
+		return
+	}
+	h.service.SetEnabledLeagueIDs(next.EnabledLeagues)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), sportsRefreshTimeout)
+		defer cancel()
+		if err := h.service.Refresh(ctx); err != nil {
+			log.Printf("[sports] settings refresh error: %v", err)
+		}
+	}()
+	writeSportsJSON(w, next)
+}
+
+func (h *SportsHandler) ClearLogoCache(w http.ResponseWriter, r *http.Request) {
+	if err := h.service.ClearLogoCache(); err != nil {
+		http.Error(w, `{"error":"failed to clear sports logo cache"}`, http.StatusInternalServerError)
+		return
+	}
+	writeSportsJSON(w, map[string]any{"status": "cleared"})
+}
+
+func (h *SportsHandler) GetLogo(w http.ResponseWriter, r *http.Request) {
+	data, contentType, err := h.service.GetCachedLogo(r.Context(), strings.TrimSpace(r.URL.Query().Get("url")))
+	if err != nil {
+		http.Error(w, `{"error":"sports logo unavailable"}`, http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	_, _ = w.Write(data)
 }
 
 // GetGame returns a single cached game by ID.
@@ -122,11 +313,66 @@ func (h *SportsHandler) GetGameStreams(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"failed to fetch live channels"}`, http.StatusBadGateway)
 		return
 	}
+	if h.config != nil {
+		if settings, loadErr := h.config.Load(); loadErr == nil {
+			sourceIDs := settings.Sports.DefaultSourceIDs
+			categoryIDs := settings.Sports.DefaultCategoryIDs
+			if override, ok := settings.Sports.LeagueSearchOverrides[game.League]; ok {
+				if len(override.SourceIDs) > 0 {
+					sourceIDs = override.SourceIDs
+				}
+				if len(override.CategoryIDs) > 0 {
+					categoryIDs = override.CategoryIDs
+				}
+			}
+			channels = filterSportsChannelsByScope(channels, sourceIDs, categoryIDs)
+		}
+	}
 
 	broadcastFilter := strings.TrimSpace(r.URL.Query().Get("broadcast"))
 	matches := matchGameToChannels(game, channels, h.epgService, broadcastFilter)
+	matches = onlyStrongSportsMatches(matches)
 	streams, groups := buildSportsStreamGroups(matches)
 	writeSportsJSON(w, map[string]any{"streams": streams, "groups": groups})
+}
+
+func onlyStrongSportsMatches(matches []models.SportsStreamMatch) []models.SportsStreamMatch {
+	strong := make([]models.SportsStreamMatch, 0, len(matches))
+	for _, match := range matches {
+		if match.Confidence >= strongSportsConfidence {
+			strong = append(strong, match)
+		}
+	}
+	return strong
+}
+
+func filterSportsChannelsByScope(channels []LiveChannel, sourceIDs, categoryIDs []string) []LiveChannel {
+	if len(sourceIDs) == 0 && len(categoryIDs) == 0 {
+		return channels
+	}
+	sources := make(map[string]struct{}, len(sourceIDs))
+	categories := make(map[string]struct{}, len(categoryIDs))
+	for _, id := range sourceIDs {
+		sources[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+	}
+	for _, id := range categoryIDs {
+		categories[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+	}
+	filtered := make([]LiveChannel, 0, len(channels))
+	for _, channel := range channels {
+		if len(sources) > 0 {
+			if _, ok := sources[strings.ToLower(channel.SourceID)]; !ok {
+				continue
+			}
+		}
+		if len(categories) > 0 {
+			if _, ok := categories[strings.ToLower(channel.Group)]; !ok {
+				continue
+			}
+		}
+		filtered = append(filtered, channel)
+	}
+	return filtered
 }
 
 // Options handles CORS preflight requests.
@@ -143,7 +389,7 @@ func writeSportsJSON(w http.ResponseWriter, v any) {
 
 // matchGameToChannels scores every candidate through the same token-aware team/network
 // matcher used by Manage Team Channels. Current and next EPG programs can promote a
-// channel, but weak candidates remain visible as Possible Matches.
+// channel. The endpoint filters weak candidates before returning them.
 func matchGameToChannels(game models.SportsGame, channels []LiveChannel, epgService LiveEPGNowPlayingProvider, broadcastFilter string) []models.SportsStreamMatch {
 	home := identityFromTeam(game.HomeTeam, game.League)
 	away := identityFromTeam(game.AwayTeam, game.League)
@@ -179,8 +425,18 @@ func matchGameToChannels(game models.SportsGame, channels []LiveChannel, epgServ
 				continue
 			}
 		} else {
-			evidence = scoreMatchupText(channel.Name, home, away)
-			if alternate := scoreMatchupText(channel.TvgName, home, away); alternate.score > evidence.score {
+			if game.EventKind != "" && game.EventKind != "matchup" {
+				evidence = scoreSportsEventTitle(channel.Name, game.Title)
+			} else {
+				evidence = scoreMatchupText(channel.Name, home, away)
+			}
+			var alternate sportsEvidence
+			if game.EventKind != "" && game.EventKind != "matchup" {
+				alternate = scoreSportsEventTitle(channel.TvgName, game.Title)
+			} else {
+				alternate = scoreMatchupText(channel.TvgName, home, away)
+			}
+			if alternate.score > evidence.score {
 				evidence = alternate
 			}
 		}
@@ -191,6 +447,9 @@ func matchGameToChannels(game models.SportsGame, channels []LiveChannel, epgServ
 					continue
 				}
 				programEvidence := scoreMatchupText(program.Title, home, away)
+				if game.EventKind != "" && game.EventKind != "matchup" {
+					programEvidence = scoreSportsEventTitle(program.Title, game.Title)
+				}
 				if programEvidence.score <= 0 {
 					continue
 				}
@@ -243,4 +502,28 @@ func matchGameToChannels(game models.SportsGame, channels []LiveChannel, epgServ
 	}
 	sortSportsStreamMatches(matches)
 	return matches
+}
+
+func scoreSportsEventTitle(value, title string) sportsEvidence {
+	valueTokens := make(map[string]struct{})
+	for _, token := range sportsTokens(value) {
+		valueTokens[token] = struct{}{}
+	}
+	terms := make([]string, 0)
+	for _, token := range sportsTokens(title) {
+		if len(token) < 3 {
+			continue
+		}
+		switch token {
+		case "the", "and", "tour", "round", "event", "championship":
+			continue
+		}
+		if _, ok := valueTokens[token]; ok {
+			terms = append(terms, token)
+		}
+	}
+	if len(terms) < 2 {
+		return sportsEvidence{}
+	}
+	return sportsEvidence{score: math.Min(0.98, 0.82+float64(len(terms))*0.04), reason: "Event title match", terms: terms, on: "event-title"}
 }

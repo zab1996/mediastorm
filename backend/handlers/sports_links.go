@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"novastream/config"
 	"novastream/internal/datastore"
 	"novastream/models"
 )
@@ -22,7 +23,10 @@ import (
 type SportsLinksHandler struct {
 	links       datastore.SportsLinksRepository
 	liveHandler *LiveHandler
+	config      *config.Manager
 }
+
+func (h *SportsLinksHandler) SetConfigManager(manager *config.Manager) { h.config = manager }
 
 // NewSportsLinksHandler creates a new sports links handler.
 func NewSportsLinksHandler(links datastore.SportsLinksRepository, liveHandler *LiveHandler) *SportsLinksHandler {
@@ -254,7 +258,10 @@ func (h *SportsLinksHandler) evaluateLeagueAutoLinks(r *http.Request) (sportsAut
 	}
 	teams, err := h.links.ListTeamsByLeague(r.Context(), league)
 	if err != nil {
-		return sportsAutoLinkEvaluation{}, err
+		return sportsAutoLinkEvaluation{}, fmt.Errorf("load %s team catalog: %w", league, err)
+	}
+	if len(teams) == 0 {
+		return sportsAutoLinkEvaluation{preview: models.SportsAutoLinkPreview{League: league, Message: "No teams are available for this league yet. Refresh sports data and try again.", Results: []models.SportsAutoLinkTeamResult{}}, links: []models.SportsTeamChannelLink{}}, nil
 	}
 	teamIDs := make([]string, len(teams))
 	for i := range teams {
@@ -262,13 +269,28 @@ func (h *SportsLinksHandler) evaluateLeagueAutoLinks(r *http.Request) (sportsAut
 	}
 	linksByTeam, err := h.links.GetLinksForTeams(r.Context(), teamIDs)
 	if err != nil {
-		return sportsAutoLinkEvaluation{}, err
+		return sportsAutoLinkEvaluation{}, fmt.Errorf("load existing team links: %w", err)
 	}
 	var channels []LiveChannel
 	if h.liveHandler != nil {
 		channels, err = h.liveHandler.FetchFilteredChannelsForRequest(r)
 		if err != nil {
-			return sportsAutoLinkEvaluation{}, err
+			return sportsAutoLinkEvaluation{}, fmt.Errorf("load Live TV channels: %w", err)
+		}
+	}
+	if h.config != nil {
+		if settings, loadErr := h.config.Load(); loadErr == nil {
+			sourceIDs := settings.Sports.DefaultSourceIDs
+			categoryIDs := settings.Sports.DefaultCategoryIDs
+			if override, ok := settings.Sports.LeagueSearchOverrides[league]; ok {
+				if len(override.SourceIDs) > 0 {
+					sourceIDs = override.SourceIDs
+				}
+				if len(override.CategoryIDs) > 0 {
+					categoryIDs = override.CategoryIDs
+				}
+			}
+			channels = filterSportsChannelsByScope(channels, sourceIDs, categoryIDs)
 		}
 	}
 	return evaluateSportsAutoLinks(league, teams, linksByTeam, channels), nil
@@ -280,7 +302,7 @@ func (h *SportsLinksHandler) PreviewAutoLinks(w http.ResponseWriter, r *http.Req
 	evaluation, err := h.evaluateLeagueAutoLinks(r)
 	if err != nil {
 		log.Printf("[sports-links] PreviewAutoLinks failed: %v", err)
-		http.Error(w, `{"error":"failed to preview automatic links"}`, http.StatusInternalServerError)
+		writeSportsJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "Automatic link preview failed: " + err.Error(), "stage": "preview"})
 		return
 	}
 	writeSportsJSON(w, evaluation.preview)
@@ -292,19 +314,25 @@ func (h *SportsLinksHandler) ApplyAutoLinks(w http.ResponseWriter, r *http.Reque
 	evaluation, err := h.evaluateLeagueAutoLinks(r)
 	if err != nil {
 		log.Printf("[sports-links] ApplyAutoLinks evaluation failed: %v", err)
-		http.Error(w, `{"error":"failed to evaluate automatic links"}`, http.StatusInternalServerError)
+		writeSportsJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "Automatic link evaluation failed: " + err.Error(), "stage": "evaluate"})
 		return
 	}
 	saved, err := h.links.InsertAutoPrimaryLinks(r.Context(), evaluation.links)
 	if err != nil {
 		log.Printf("[sports-links] ApplyAutoLinks insert failed: %v", err)
-		http.Error(w, `{"error":"failed to apply automatic links"}`, http.StatusInternalServerError)
+		writeSportsJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "Automatic link save failed: " + err.Error(), "stage": "save"})
 		return
 	}
 	for i := range saved {
 		saved[i].Resolved = true
 	}
 	writeSportsJSON(w, map[string]any{"linkedCount": len(saved), "links": saved, "preview": evaluation.preview})
+}
+
+func writeSportsJSONStatus(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 // nonNilLinks ensures a links slice serializes as JSON [] rather than null when empty -
@@ -472,24 +500,17 @@ func (h *SportsLinksHandler) Options(w http.ResponseWriter, r *http.Request) {
 }
 
 // SyncTeamsFromGames upserts every team appearing in the given games into sports_teams,
-// keyed on league+ESPN team ID. Called after each scoreboard refresh (see main.go) so
-// "Manage Team Channels" has team identities to link against - a team only appears once
-// the poller has observed it playing a game (see the plan's known coverage gap: an
-// off-day/off-season team won't show up until then).
+// keyed on league+ESPN team ID. This remains a fallback alongside the full team catalog,
+// and also keeps identities current from the frequently refreshed scoreboard payload.
 func (h *SportsLinksHandler) SyncTeamsFromGames(ctx context.Context, games []models.SportsGame) {
-	seen := make(map[string]struct{})
+	teams := make([]models.SportsTeamRecord, 0, len(games)*2)
 	for _, game := range games {
 		for _, team := range []models.SportsTeam{game.HomeTeam, game.AwayTeam} {
 			if team.ID == "" {
 				continue
 			}
-			id := fmt.Sprintf("%s:%s", game.League, team.ID)
-			if _, ok := seen[id]; ok {
-				continue
-			}
-			seen[id] = struct{}{}
-			err := h.links.UpsertTeam(ctx, models.SportsTeamRecord{
-				ID:           id,
+			teams = append(teams, models.SportsTeamRecord{
+				ID:           fmt.Sprintf("%s:%s", game.League, team.ID),
 				League:       game.League,
 				EspnTeamID:   team.ID,
 				Name:         team.Name,
@@ -498,9 +519,25 @@ func (h *SportsLinksHandler) SyncTeamsFromGames(ctx context.Context, games []mod
 				Abbreviation: team.Abbreviation,
 				LogoURL:      team.LogoURL,
 			})
-			if err != nil {
-				log.Printf("[sports-links] SyncTeamsFromGames: upsert team %s failed: %v", id, err)
-			}
+		}
+	}
+	h.SyncTeams(ctx, teams)
+}
+
+// SyncTeams upserts a complete league catalog (or any other batch of team identities),
+// de-duplicating it before touching the datastore.
+func (h *SportsLinksHandler) SyncTeams(ctx context.Context, teams []models.SportsTeamRecord) {
+	seen := make(map[string]struct{}, len(teams))
+	for _, team := range teams {
+		if team.ID == "" {
+			continue
+		}
+		if _, ok := seen[team.ID]; ok {
+			continue
+		}
+		seen[team.ID] = struct{}{}
+		if err := h.links.UpsertTeam(ctx, team); err != nil {
+			log.Printf("[sports-links] SyncTeams: upsert team %s failed: %v", team.ID, err)
 		}
 	}
 }
