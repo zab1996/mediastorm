@@ -57,11 +57,17 @@ type Settings struct {
 // Server-wide (not per-user) since the poller fetches once for the whole server on a
 // shared interval - see services/sports.LeagueCatalog for the supported league IDs.
 type SportsSettings struct {
-	EnabledLeagues        []string                     `json:"enabledLeagues,omitempty"`
-	FavoriteTeamIDs       []string                     `json:"favoriteTeamIds,omitempty"`
-	DefaultSourceIDs      []string                     `json:"defaultSourceIds,omitempty"`
-	DefaultCategoryIDs    []string                     `json:"defaultCategoryIds,omitempty"`
-	LeagueSearchOverrides map[string]SportsSearchScope `json:"leagueSearchOverrides,omitempty"`
+	// No omitempty on these: Normalize() guarantees they're always non-nil ([]/{} at
+	// minimum), but Go's encoding/json omits a zero-length slice/map as "empty" regardless
+	// of nil-ness when omitempty is set - the common case (no favorites/overrides added
+	// yet) would silently drop the field, leaving frontend code like
+	// sportsSettings.favoriteTeamIds.includes(...) crashing on undefined instead of
+	// working against an empty array.
+	EnabledLeagues        []string                     `json:"enabledLeagues"`
+	FavoriteTeamIDs       []string                     `json:"favoriteTeamIds"`
+	DefaultSourceIDs      []string                     `json:"defaultSourceIds"`
+	DefaultCategoryIDs    []string                     `json:"defaultCategoryIds"`
+	LeagueSearchOverrides map[string]SportsSearchScope `json:"leagueSearchOverrides"`
 }
 
 // SportsSearchScope limits automatic sports stream discovery for one league. Empty lists
