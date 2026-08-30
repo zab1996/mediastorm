@@ -482,7 +482,12 @@ func Register(
 		protected.HandleFunc("/sports/settings", sportsHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/sports/logo-cache/clear", sportsHandler.ClearLogoCache).Methods(http.MethodPost)
 		protected.HandleFunc("/sports/logo-cache/clear", sportsHandler.Options).Methods(http.MethodOptions)
-		protected.HandleFunc("/sports/logo", sportsHandler.GetLogo).Methods(http.MethodGet, http.MethodHead)
+		// Public like /images/proxy above - browser <img> tags can't attach an Authorization
+		// header, and this only ever proxies a host-allowlisted (*.espncdn.com) URL, so
+		// auth wasn't protecting anything real here - it was just silently 401ing every
+		// logo request instead.
+		api.HandleFunc("/sports/logo", sportsHandler.GetLogo).Methods(http.MethodGet, http.MethodHead)
+		api.HandleFunc("/sports/logo", sportsHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/live/search", sportsHandler.SearchLiveHub).Methods(http.MethodGet)
 		protected.HandleFunc("/live/search", sportsHandler.Options).Methods(http.MethodOptions)
 		protected.HandleFunc("/sports/status", sportsHandler.GetStatus).Methods(http.MethodGet)
