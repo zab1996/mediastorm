@@ -768,6 +768,16 @@ func getFirstLangValue(values []xmltvLang) string {
 // parseXMLTVTime parses XMLTV time format (YYYYMMDDHHmmss +/-HHMM).
 var xmltvTimeRegex = regexp.MustCompile(`^(\d{14})(?:\s*([+-]\d{4}))?$`)
 
+// Precompiled for normalizeChannelID, which is called (indirectly, via
+// findProgramsByChannelMatch's linear scan) once per EPG channel on every unmatched
+// lookup - recompiling these from scratch per call (as this used to do) made a single
+// miss against a large EPG dataset cost tens of thousands of regexp.MustCompile calls.
+var (
+	countryPrefixRegex = regexp.MustCompile(`^[a-z]{2}\s*[\|\-]\s*`)
+	countrySuffixRegex = regexp.MustCompile(`\.[a-z]{2}$`)
+	nonAlphaNumRegex   = regexp.MustCompile(`[^a-z0-9]`)
+)
+
 func parseXMLTVTime(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	matches := xmltvTimeRegex.FindStringSubmatch(s)
@@ -997,13 +1007,11 @@ func normalizeChannelID(s string) string {
 		s = strings.TrimSuffix(s, suffix)
 	}
 	// Remove country prefixes like "us |", "uk |", "ca -" etc
-	prefixPattern := regexp.MustCompile(`^[a-z]{2}\s*[\|\-]\s*`)
-	s = prefixPattern.ReplaceAllString(s, "")
+	s = countryPrefixRegex.ReplaceAllString(s, "")
 	// Remove trailing country codes like .us, .uk, .ca
-	s = regexp.MustCompile(`\.[a-z]{2}$`).ReplaceAllString(s, "")
+	s = countrySuffixRegex.ReplaceAllString(s, "")
 	// Remove special characters and spaces
-	reg := regexp.MustCompile(`[^a-z0-9]`)
-	return reg.ReplaceAllString(s, "")
+	return nonAlphaNumRegex.ReplaceAllString(s, "")
 }
 
 // GetEPGChannelID attempts to find the EPG channel ID for a live channel.
