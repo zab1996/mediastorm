@@ -4,13 +4,11 @@ name: Build and push image
 # backend's Dockerfile expects a sibling frontend/ directory (it serves the exported Expo web
 # app from /watch), so this checks out both repos side by side before building. mediastorm-
 # frontend is private, so the second checkout needs a PAT with read access to it - see
-# FRONTEND_REPO_TOKEN below. Triggered directly by pushes here, and by repository_dispatch
-# from mediastorm-frontend's own workflow so a frontend-only change also gets a fresh image.
+# FRONTEND_REPO_TOKEN below. Triggered directly by pushes here, and via workflow_dispatch from
+# mediastorm-frontend's own workflow so a frontend-only change also gets a fresh image.
 on:
   push:
     branches: [sports-iptv]
-  repository_dispatch:
-    types: [frontend-updated]
   workflow_dispatch:
 
 concurrency:
