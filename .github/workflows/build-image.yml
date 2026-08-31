@@ -1,0 +1,62 @@
+name: Build and push image
+
+# Builds the combined backend+web image exactly like the local dev workflow does: the Go
+# backend's Dockerfile expects a sibling frontend/ directory (it serves the exported Expo web
+# app from /watch), so this checks out both repos side by side before building. mediastorm-
+# frontend is private, so the second checkout needs a PAT with read access to it - see
+# FRONTEND_REPO_TOKEN below. Triggered directly by pushes here, and by repository_dispatch
+# from mediastorm-frontend's own workflow so a frontend-only change also gets a fresh image.
+on:
+  push:
+    branches: [sports-iptv]
+  repository_dispatch:
+    types: [frontend-updated]
+  workflow_dispatch:
+
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+        with:
+          ref: sports-iptv
+
+      - name: Checkout frontend (private repo)
+        uses: actions/checkout@v4
+        with:
+          repository: zab1996/mediastorm-frontend
+          ref: sports-iptv
+          token: ${{ secrets.FRONTEND_REPO_TOKEN }}
+          path: frontend
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/zab1996/mediastorm:sports-iptv
+            ghcr.io/zab1996/mediastorm:sports-iptv-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
